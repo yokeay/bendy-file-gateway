@@ -1,14 +1,14 @@
 package middleware
 
-import "github.com/bendy/file-gateway/internal/server"
+import "github.com/bendy/file-gateway/internal/types"
 
 // CORS adds cross-origin resource sharing headers.
-func CORS() server.Middleware {
-	return func(next server.Handler) server.Handler {
-		return func(req *server.Request) server.Response {
+func CORS() types.Middleware {
+	return func(next types.Handler) types.Handler {
+		return func(req *types.Request) types.Response {
 			// Handle preflight
 			if req.Method == "OPTIONS" {
-				return server.Response{
+				return types.Response{
 					StatusCode: 204,
 					Headers: map[string]string{
 						"Access-Control-Allow-Origin":      "*",

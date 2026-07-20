@@ -4,13 +4,13 @@ import (
 	"strings"
 
 	"github.com/bendy/file-gateway/internal/auth"
-	"github.com/bendy/file-gateway/internal/server"
+	"github.com/bendy/file-gateway/internal/types"
 )
 
 // Auth checks authentication for tenant API and admin API routes.
-func Auth() server.Middleware {
-	return func(next server.Handler) server.Handler {
-		return func(req *server.Request) server.Response {
+func Auth() types.Middleware {
+	return func(next types.Handler) types.Handler {
+		return func(req *types.Request) types.Response {
 			path := strings.TrimRight(req.Path, "/")
 
 			switch {
@@ -26,10 +26,10 @@ func Auth() server.Middleware {
 	}
 }
 
-func tenantAuth(next server.Handler, req *server.Request) server.Response {
+func tenantAuth(next types.Handler, req *types.Request) types.Response {
 	result, err := auth.VerifyTenantRequest(req)
 	if err != nil {
-		return server.Error(401, "unauthorized", err.Error(), nil)
+		return types.Error(401, "unauthorized", err.Error(), nil)
 	}
 
 	req.TenantID = result.TenantID
@@ -37,7 +37,7 @@ func tenantAuth(next server.Handler, req *server.Request) server.Response {
 	return next(req)
 }
 
-func adminAuth(next server.Handler, req *server.Request) server.Response {
+func adminAuth(next types.Handler, req *types.Request) types.Response {
 	// Skip auth for login endpoint
 	if strings.HasSuffix(req.Path, "/auth/github") {
 		return next(req)
@@ -46,17 +46,17 @@ func adminAuth(next server.Handler, req *server.Request) server.Response {
 	// Check session cookie
 	cookie := req.Headers["cookie"]
 	if cookie == "" {
-		return server.Error(401, "unauthorized", "missing session cookie", nil)
+		return types.Error(401, "unauthorized", "missing session cookie", nil)
 	}
 
 	sessionToken := extractCookie(cookie, "session_token")
 	if sessionToken == "" {
-		return server.Error(401, "unauthorized", "missing session token", nil)
+		return types.Error(401, "unauthorized", "missing session token", nil)
 	}
 
 	adminID, err := auth.ValidateAdminSession(sessionToken)
 	if err != nil {
-		return server.Error(401, "unauthorized", err.Error(), nil)
+		return types.Error(401, "unauthorized", err.Error(), nil)
 	}
 
 	req.AdminID = adminID

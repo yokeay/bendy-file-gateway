@@ -4,13 +4,13 @@ import (
 	"log"
 	"time"
 
-	"github.com/bendy/file-gateway/internal/server"
+	"github.com/bendy/file-gateway/internal/types"
 )
 
 // Logging logs each request with method, path, status, and duration.
-func Logging() server.Middleware {
-	return func(next server.Handler) server.Handler {
-		return func(req *server.Request) server.Response {
+func Logging() types.Middleware {
+	return func(next types.Handler) types.Handler {
+		return func(req *types.Request) types.Response {
 			start := time.Now()
 			resp := next(req)
 			duration := time.Since(start)

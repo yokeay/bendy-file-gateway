@@ -64,9 +64,21 @@ CREATE TABLE IF NOT EXISTS files (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS admins (
+    id TEXT PRIMARY KEY,
+    github_username TEXT NOT NULL UNIQUE,
+    github_id INTEGER NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    avatar_url TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'admin',
+    last_login_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS admin_sessions (
     id TEXT PRIMARY KEY,
-    admin_id TEXT NOT NULL,
+    admin_id TEXT NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
     session_token TEXT NOT NULL UNIQUE,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL

@@ -5,13 +5,14 @@ import (
 	"log"
 
 	"github.com/bendy/file-gateway/internal/server/middleware"
+	"github.com/bendy/file-gateway/internal/types"
 	"github.com/bendy/file-gateway/internal/wasm"
 )
 
 // HandleRequest is the main entry point for all HTTP requests.
 // It is called from the WASM host (JS) via exports.
 func HandleRequest(method, path, headersJSON, body, remoteAddr string) wasm.RequestResult {
-	req := &Request{
+	req := &types.Request{
 		Method:     method,
 		Path:       path,
 		Headers:    parseHeaders(headersJSON),
@@ -33,7 +34,7 @@ func HandleRequest(method, path, headersJSON, body, remoteAddr string) wasm.Requ
 	return wasm.RequestResult{
 		StatusCode: resp.StatusCode,
 		Headers:    resp.Headers,
-		Body:       resp.Body,
+		Body:       string(resp.Body),
 	}
 }
 

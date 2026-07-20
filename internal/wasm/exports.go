@@ -9,15 +9,18 @@ import (
 type RequestResult struct {
 	StatusCode int               `json:"status_code"`
 	Headers    map[string]string `json:"headers"`
-	Body       []byte            `json:"body"`
+	Body       string            `json:"body"`
 }
 
 // HandleRequestFunc is the type for exported request handlers.
 type HandleRequestFunc func(method, path, headersJSON, body string, remoteAddr string) RequestResult
 
 var handleRequestFn HandleRequestFunc
-
 var readyCalled bool
+
+// lastResultBuf holds the last response to prevent GC from collecting it
+// before the JS host has a chance to read it.
+var lastResultBuf []byte
 
 // ExportHandleRequest registers the request handler.
 func ExportHandleRequest(fn HandleRequestFunc) {
@@ -61,17 +64,17 @@ func readString(ptr unsafe.Pointer, length int32) string {
 	if ptr == nil || length <= 0 {
 		return ""
 	}
-	buf := unsafe.Slice((*byte)(ptr), length)
-	return string(buf)
+	return unsafe.String((*byte)(ptr), length)
 }
 
 func writeToMemory(data []byte) int64 {
 	if len(data) == 0 {
 		return 0
 	}
-	// Allocate memory that JS host can read
 	buf := make([]byte, len(data)+1)
 	copy(buf, data)
-	buf[len(data)] = 0 // null terminator
+	buf[len(data)] = 0
+	// Keep reference to prevent GC from collecting before JS reads
+	lastResultBuf = buf
 	return int64(uintptr(unsafe.Pointer(&buf[0])))
 }

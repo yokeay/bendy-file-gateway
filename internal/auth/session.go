@@ -18,8 +18,8 @@ func CreateAdminSession(adminID string) (string, error) {
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := wasm.DBExec(
-		`INSERT INTO admin_sessions (id, admin_id, expires_at, created_at) VALUES (?, ?, ?, ?)`,
-		[]interface{}{sessionToken, adminID, expiresAt, createdAt},
+		`INSERT INTO admin_sessions (id, admin_id, session_token, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
+		[]interface{}{sessionToken, adminID, sessionToken, expiresAt, createdAt},
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)

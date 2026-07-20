@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bendy/file-gateway/internal/server"
+	"github.com/bendy/file-gateway/internal/types"
 	"github.com/bendy/file-gateway/internal/wasm"
 )
 
@@ -21,7 +21,7 @@ type TenantAuthResult struct {
 }
 
 // VerifyTenantRequest verifies the HMAC-SHA256 signature on a tenant API request.
-func VerifyTenantRequest(req *server.Request) (*TenantAuthResult, error) {
+func VerifyTenantRequest(req *types.Request) (*TenantAuthResult, error) {
 	authHeader := req.Headers["authorization"]
 	if authHeader == "" {
 		return nil, fmt.Errorf("missing Authorization header")

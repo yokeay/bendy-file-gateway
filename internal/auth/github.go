@@ -3,11 +3,11 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"os"
 	"strings"
+
+	"github.com/bendy/file-gateway/internal/config"
+	"github.com/bendy/file-gateway/internal/wasm"
 )
 
 // GitHubUser represents a GitHub user from the API.
@@ -25,11 +25,9 @@ type GitHubOAuthClient struct {
 	allowedUsers map[string]bool
 }
 
-// NewGitHubOAuthClient creates a new GitHub OAuth client from environment variables.
+// NewGitHubOAuthClient creates a new GitHub OAuth client from config.
 func NewGitHubOAuthClient() *GitHubOAuthClient {
-	clientID := os.Getenv("GITHUB_CLIENT_ID")
-	clientSecret := os.Getenv("GITHUB_CLIENT_SECRET")
-	allowedRaw := os.Getenv("ADMIN_GITHUB_USERNAMES")
+	allowedRaw := config.Get("ADMIN_GITHUB_USERNAMES")
 
 	allowedUsers := map[string]bool{}
 	for _, u := range strings.Split(allowedRaw, ",") {
@@ -40,51 +38,65 @@ func NewGitHubOAuthClient() *GitHubOAuthClient {
 	}
 
 	return &GitHubOAuthClient{
-		clientID:     clientID,
-		clientSecret: clientSecret,
+		clientID:     config.Get("GITHUB_CLIENT_ID"),
+		clientSecret: config.Get("GITHUB_CLIENT_SECRET"),
 		allowedUsers: allowedUsers,
 	}
 }
 
 // ExchangeCode exchanges an OAuth code for a GitHub access token.
 func (c *GitHubOAuthClient) ExchangeCode(code string) (string, error) {
-	resp, err := http.PostForm("https://github.com/login/oauth/access_token", url.Values{
-		"client_id":     {c.clientID},
-		"client_secret": {c.clientSecret},
-		"code":          {code},
-	})
+	resp, err := wasm.Fetch("POST", "https://github.com/login/oauth/access_token",
+		map[string]string{
+			"Content-Type": "application/x-www-form-urlencoded",
+			"Accept":       "application/json",
+		},
+		fmt.Sprintf("client_id=%s&client_secret=%s&code=%s",
+			url.QueryEscape(c.clientID),
+			url.QueryEscape(c.clientSecret),
+			url.QueryEscape(code)),
+	)
 	if err != nil {
 		return "", fmt.Errorf("token exchange failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	values, err := url.ParseQuery(string(body))
-	if err != nil {
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("token exchange returned status %d: %s", resp.StatusCode, resp.Body)
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+		Error       string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
 		return "", fmt.Errorf("failed to parse token response: %w", err)
 	}
-
-	token := values.Get("access_token")
-	if token == "" {
-		return "", fmt.Errorf("no access token in response")
+	if result.Error != "" {
+		return "", fmt.Errorf("token exchange error: %s", result.Error)
 	}
-	return token, nil
+
+	return result.AccessToken, nil
 }
 
 // GetUser fetches the GitHub user profile for an access token.
 func (c *GitHubOAuthClient) GetUser(token string) (*GitHubUser, error) {
-	req, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := wasm.Fetch("GET", "https://api.github.com/user",
+		map[string]string{
+			"Authorization": "Bearer " + token,
+			"Accept":        "application/vnd.github.v3+json",
+		},
+		"",
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch user: %w", err)
 	}
-	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub API returned status %d: %s", resp.StatusCode, resp.Body)
+	}
 
 	var user GitHubUser
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+	if err := json.Unmarshal([]byte(resp.Body), &user); err != nil {
 		return nil, fmt.Errorf("failed to decode user: %w", err)
 	}
 	return &user, nil

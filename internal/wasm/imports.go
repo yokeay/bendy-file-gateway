@@ -22,6 +22,12 @@ func cacheSet(keyPtr unsafe.Pointer, keyLen int32, valuePtr unsafe.Pointer, valu
 //go:wasmimport env cacheDel
 func cacheDel(keyPtr unsafe.Pointer, keyLen int32)
 
+//go:wasmimport env envGet
+func envGet(keyPtr unsafe.Pointer, keyLen int32) int64
+
+//go:wasmimport env fetch
+func fetch(methodPtr unsafe.Pointer, methodLen int32, urlPtr unsafe.Pointer, urlLen int32, headersPtr unsafe.Pointer, headersLen int32, bodyPtr unsafe.Pointer, bodyLen int32) int64
+
 // DBQuery executes a query via the JS host database.
 func DBQuery(sql string, params []interface{}) ([]map[string]interface{}, error) {
 	paramsJSON, err := json.Marshal(params)
@@ -97,6 +103,50 @@ func CacheSet(key string, value []byte, ttlSeconds int) {
 func CacheDel(key string) {
 	keyBytes := stringToBytes(key)
 	cacheDel(unsafe.Pointer(&keyBytes[0]), int32(len(keyBytes)))
+}
+
+// GetEnv retrieves an environment variable from the JS host.
+func GetEnv(key string) string {
+	keyBytes := stringToBytes(key)
+	resultPtr := envGet(unsafe.Pointer(&keyBytes[0]), int32(len(keyBytes)))
+	if resultPtr == 0 {
+		return ""
+	}
+	return ptrToString(resultPtr)
+}
+
+// FetchResponse represents an HTTP response from the JS host fetch.
+type FetchResponse struct {
+	StatusCode int               `json:"status_code"`
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"`
+}
+
+// Fetch makes an HTTP request via the JS host.
+func Fetch(method, url string, headers map[string]string, body string) (*FetchResponse, error) {
+	headersJSON, err := json.Marshal(headers)
+	if err != nil {
+		return nil, err
+	}
+
+	methodBytes := stringToBytes(method)
+	urlBytes := stringToBytes(url)
+	headersBytes := headersJSON
+	bodyBytes := stringToBytes(body)
+
+	resultPtr := fetch(
+		unsafe.Pointer(&methodBytes[0]), int32(len(methodBytes)),
+		unsafe.Pointer(&urlBytes[0]), int32(len(urlBytes)),
+		unsafe.Pointer(&headersBytes[0]), int32(len(headersBytes)),
+		unsafe.Pointer(&bodyBytes[0]), int32(len(bodyBytes)),
+	)
+
+	resultJSON := ptrToString(resultPtr)
+	var resp FetchResponse
+	if err := json.Unmarshal([]byte(resultJSON), &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 func stringToBytes(s string) []byte {
