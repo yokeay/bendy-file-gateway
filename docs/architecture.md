@@ -1,0 +1,96 @@
+# bendy-file-gateway Architecture
+
+## 1. 整体架构
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                     Client / SDK                          │
+│  HMAC-SHA256(AccessKey:Signature) + X-Bendy-Timestamp    │
+└────────────────────┬─────────────────────────────────────┘
+                     │ HTTPS
+                     ▼
+┌──────────────────────────────────────────────────────────┐
+│              Platform Layer (JS/TS Host)                  │
+│  Cloudflare Worker / Vercel Function                      │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │  index.ts / gateway.ts                           │    │
+│  │  - Receives HTTP request                          │    │
+│  │  - Serializes to WASM format                      │    │
+│  │  - Calls WASM.exports.handleRequest()             │    │
+│  │  - Returns HTTP response                          │    │
+│  └──────────────────┬───────────────────────────────┘    │
+│                     │ WASM bridge                         │
+│  ┌──────────────────▼───────────────────────────────┐    │
+│  │  Go WASM Module (gateway.wasm)                    │    │
+│  │                                                    │    │
+│  │  Middleware Chain:                                  │    │
+│  │  Recovery → CORS → Logging → Auth → Quota → Router │    │
+│  │                                                    │    │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │    │
+│  │  │ Handlers │ │   Auth   │ │ Storage Manager  │  │    │
+│  │  │ file.go  │ │ tenant   │ │ (driver routing) │  │    │
+│  │  │ dir.go   │ │ admin    │ │                  │  │    │
+│  │  │ tenant   │ │ github   │ │ S3 | OSS | Redis │  │    │
+│  │  └──────────┘ └──────────┘ └──────────────────┘  │    │
+│  └──────────────────┬───────────────────────────────┘    │
+│                     │ imports (host calls)                 │
+│  ┌──────────────────▼───────────────────────────────┐    │
+│  │  JS Host Functions                                │    │
+│  │  dbQuery() → D1/PostgreSQL                        │    │
+│  │  dbExec() → D1/PostgreSQL                         │    │
+│  │  cacheGet/Set/Del() → KV/Redis                     │    │
+│  └──────────────────────────────────────────────────┘    │
+└──────────────────────────────────────────────────────────┘
+                     │ HTTP
+                     ▼
+┌──────────────────────────────────────────────────────────┐
+│                Third-Party Storage Backends                │
+│  AWS S3 | Aliyun OSS | Huawei OBS | Qiniu | Tencent COS  │
+│  Tianyi OOS | Unicom OSS | Redis | PostgreSQL | MySQL    │
+└──────────────────────────────────────────────────────────┘
+```
+
+## 2. WASM Bridge
+
+Go 编译为 WASM 后运行在 JS 宿主中。双向通信：
+
+**Go → JS (exports)**:
+- `handleRequest(method, path, headers, body, remoteAddr) → (status, headers, body)` — HTTP 请求主入口
+- `ready()` — 初始化完成信号
+
+**JS → Go (imports)**:
+- `dbQuery(sql, params) → JSON` — 查询
+- `dbExec(sql, params) → JSON` — 变更
+- `cacheGet(key) → (value, found)` — 缓存读取
+- `cacheSet(key, value, ttl)` — 缓存写入
+- `cacheDel(key)` — 缓存删除
+
+## 3. 请求生命周期
+
+```
+1. Platform 收到 HTTP 请求
+2. Platform 序列化请求为字节
+3. Platform 调用 WASM.handleRequest()
+4. Go 中间件链处理：
+   a. Recovery — 捕获 panic
+   b. CORS — 跨域处理
+   c. Logging — 请求日志
+   d. Auth — 身份验证（租户 HMAC 或管理员 Session）
+   e. Quota — 配额检查（仅租户请求）
+   f. Router — 路由分发
+   g. Handler — 业务逻辑
+5. Handler 通过 WASM imports 查询/更新数据库和缓存
+6. Handler 通过 HTTP 客户端调用存储后端
+7. Go 返回响应给 Platform
+8. Platform 反序列化并返回 HTTP 响应
+```
+
+## 4. 分支策略
+
+| 分支 | 内容 | 数据库 | 缓存 | 入口 |
+|------|------|--------|------|------|
+| `main` | 共享 Go + React 源码 | Schema 文件 | 无 | 纯库代码 |
+| `cf` | Cloudflare Workers 部署 | D1 bindings | KV bindings | `platforms/cloudflare/index.ts` |
+| `vercel` | Vercel 部署 | PostgreSQL bindings | Redis bindings | `platforms/vercel/api/gateway.ts` |
+
+开发流程：所有特性在 `main` 开发 → 合并到 `cf` 和 `vercel` 进行平台适配 → 部署。

@@ -1,0 +1,24 @@
+{
+  "functions": {
+    "api/gateway.ts": {
+      "memory": 256,
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/api/gateway"
+    }
+  ],
+  "env": {
+    "VERSION": "0.1.0",
+    "ADMIN_GITHUB_CLIENT_ID": "@admin-github-client-id",
+    "ADMIN_GITHUB_CLIENT_SECRET": "@admin-github-client-secret",
+    "ADMIN_GITHUB_REDIRECT_URI": "@admin-github-redirect-uri",
+    "ADMIN_GITHUB_USERNAMES": "@admin-github-usernames",
+    "SESSION_SECRET": "@session-secret",
+    "DATABASE_URL": "@database-url",
+    "REDIS_URL": "@redis-url"
+  }
+}

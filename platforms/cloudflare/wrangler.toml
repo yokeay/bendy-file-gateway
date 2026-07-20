@@ -1,0 +1,20 @@
+name = "bendy-file-gateway"
+main = "index.ts"
+compatibility_date = "2024-07-20"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bendy-gateway-db"
+database_id = ""
+
+[[kv_namespaces]]
+binding = "KV"
+id = ""
+
+[vars]
+VERSION = "0.1.0"
+ADMIN_GITHUB_CLIENT_ID = ""
+ADMIN_GITHUB_CLIENT_SECRET = ""
+ADMIN_GITHUB_REDIRECT_URI = ""
+ADMIN_GITHUB_USERNAMES = ""
+SESSION_SECRET = ""

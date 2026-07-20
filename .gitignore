@@ -1,0 +1,22 @@
+# Build outputs
+platforms/wasm/
+platforms/cloudflare/wasm/
+platforms/cloudflare/public/
+platforms/vercel/wasm/
+platforms/vercel/public/
+web/dist/
+web/node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
