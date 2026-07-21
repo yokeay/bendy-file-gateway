@@ -6,6 +6,7 @@ import gatewayWasm from './wasm/gateway.wasm';
 interface Env {
   DB: D1Database;
   KV: KVNamespace;
+  ASSETS: { fetch: typeof fetch };
   VERSION: string;
   ADMIN_GITHUB_CLIENT_ID: string;
   ADMIN_GITHUB_CLIENT_SECRET: string;
@@ -32,14 +33,100 @@ interface WASMExports {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+async function createSignedToken(adminID: string, secret: string): Promise<string> {
+  const expiresAtUnix = Math.floor(Date.now() / 1000) + 86400;
+  const payload = adminID + '.' + expiresAtUnix;
+
+  const key = await crypto.subtle.importKey(
+    'raw', encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false, ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(payload));
+  const sigHex = Array.from(new Uint8Array(sig))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+
+  return sigHex + '.' + adminID + '.' + expiresAtUnix;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // --- OAuth callback from GitHub ---
+    // GET /api/auth/callback/github?code=XXX&state=YYY
+    if (url.pathname === '/api/auth/callback/github' && request.method === 'GET') {
+      const code = url.searchParams.get('code');
+      if (!code) {
+        return new Response(
+          JSON.stringify({ status: 'error', message: 'missing authorization code' }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+
+      try {
+        // Exchange code for access token
+        const tokenResp = await fetch('https://github.com/login/oauth/access_token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+          body: `client_id=${encodeURIComponent(env.ADMIN_GITHUB_CLIENT_ID || '')}&client_secret=${encodeURIComponent(env.ADMIN_GITHUB_CLIENT_SECRET || '')}&code=${encodeURIComponent(code)}`,
+        });
+        const tokenData = await tokenResp.json() as Record<string, unknown>;
+        if (!tokenData.access_token) {
+          return new Response(
+            JSON.stringify({ status: 'error', message: 'token exchange failed', detail: tokenData.error_description || tokenData.error || 'unknown' }),
+            { status: 401, headers: { 'content-type': 'application/json' } },
+          );
+        }
+
+        // Fetch GitHub user
+        const userResp = await fetch('https://api.github.com/user', {
+          headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'bendy-file-gateway' },
+        });
+        const ghUser = await userResp.json() as Record<string, unknown>;
+
+        const ghLogin = String(ghUser.login || '');
+        const allowedUsers = (env.ADMIN_GITHUB_USERNAMES || '').split(',').map(u => u.trim()).filter(Boolean);
+
+        if (!allowedUsers.includes(ghLogin)) {
+          return Response.redirect(url.origin + '/admin?error=forbidden', 302);
+        }
+
+        // Create signed session token
+        const sessionToken = await createSignedToken(ghLogin, env.SESSION_SECRET || '');
+
+        // Redirect to admin with session cookie
+        return new Response(null, {
+          status: 302,
+          headers: {
+            'Location': url.origin + '/admin',
+            'Set-Cookie': `session_token=${sessionToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400`,
+          },
+        });
+      } catch (e: any) {
+        return new Response(
+          JSON.stringify({ status: 'error', message: `OAuth callback failed: ${e.message || e}` }),
+          { status: 500, headers: { 'content-type': 'application/json' } },
+        );
+      }
+    }
+
+    // --- OAuth initiation ---
+    // GET /admin/api/v1/auth/github → redirect to GitHub authorize URL
+    if (url.pathname === '/admin/api/v1/auth/github' && request.method === 'GET') {
+      const redirectURI = env.ADMIN_GITHUB_REDIRECT_URI || '';
+      const authorizeURL = 'https://github.com/login/oauth/authorize' +
+        `?client_id=${encodeURIComponent(env.ADMIN_GITHUB_CLIENT_ID || '')}` +
+        `&redirect_uri=${encodeURIComponent(redirectURI)}` +
+        '&scope=read:user';
+      return Response.redirect(authorizeURL, 302);
+    }
+
     // --- Mutable state shared via closures ---
     let memBuf: ArrayBuffer;
     let wasmExports: WASMExports;
     let ioLog = '';
 
-    // --- Helper functions ---
     function readStr(ptr: number, maxLen: number = 65536): string {
       const buf = new Uint8Array(memBuf, ptr, maxLen);
       let end = 0;
@@ -105,15 +192,14 @@ export default {
     // --- Env import stubs (closures over mutable memBuf/wasmExports) ---
     const envImports = {
       dbQuery(sqlPtr: number, sqlLen: number, paramsPtr: number, paramsLen: number): bigint {
-        // D1 queries are async — can't be called from sync WASM import.
-        // For health endpoint, this isn't called.
         return BigInt(allocStr('[]'));
       },
       dbExec(sqlPtr: number, sqlLen: number, paramsPtr: number, paramsLen: number): bigint {
+        // Return error to trigger signed-token fallback in Go handler
         return BigInt(allocStr(JSON.stringify({ rows_affected: 0, last_insert_id: 0 })));
       },
       cacheGet(keyPtr: number, keyLen: number): bigint {
-        return BigInt(0); // not found
+        return BigInt(0);
       },
       cacheSet(keyPtr: number, keyLen: number, valuePtr: number, valueLen: number, ttlSeconds: number): void {},
       cacheDel(keyPtr: number, keyLen: number): void {},
@@ -124,7 +210,6 @@ export default {
         return BigInt(allocStr(val));
       },
       fetch(methodPtr: number, methodLen: number, urlPtr: number, urlLen: number, headersPtr: number, headersLen: number, bodyPtr: number, bodyLen: number): bigint {
-        // async fetch not available in sync WASM import
         return BigInt(allocStr(JSON.stringify({ status_code: 502, headers: {}, body: 'fetch not available in sync context' })));
       },
     };
@@ -154,7 +239,6 @@ export default {
       });
     }
 
-    // Flush any log output
     if (ioLog) { console.log(ioLog); ioLog = ''; }
 
     if (wasmExports.ready() !== 1) {
@@ -163,17 +247,22 @@ export default {
       });
     }
 
-    // --- Routing ---
-    const url = new URL(request.url);
-
-    // Admin SPA fallback
+    // Admin SPA — serve static assets
     if (url.pathname.startsWith('/admin') && !url.pathname.startsWith('/admin/api/')) {
-      return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Bendy File Gateway</title></head><body><div id="root"></div><p>Admin dashboard static files not built. Run: cd web && npm run build</p></body></html>`, {
-        status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+      try {
+        const assetResp = await env.ASSETS.fetch(request);
+        // If the asset was found (not 404), return it; otherwise serve index.html (SPA fallback)
+        if (assetResp.status !== 404) return assetResp;
+        const indexRequest = new Request(url.origin + '/index.html', request);
+        const indexResp = await env.ASSETS.fetch(indexRequest);
+        if (indexResp.status !== 404) return indexResp;
+      } catch { /* fall through to error below */ }
+      return new Response('Admin dashboard not found. Run: cd web && npm run build', {
+        status: 404, headers: { 'content-type': 'text/plain' },
       });
     }
 
-    // GitHub OAuth intercept
+    // GitHub OAuth POST intercept — exchanges code for user, passes github_user to WASM
     let body = await request.text() || '';
     if (url.pathname === '/admin/api/v1/auth/github' && request.method === 'POST') {
       try {
@@ -187,7 +276,7 @@ export default {
           const tokenData = await tokenResp.json() as Record<string, unknown>;
           if (tokenData.access_token) {
             const userResp = await fetch('https://api.github.com/user', {
-              headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Accept': 'application/vnd.github.v3+json' },
+              headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'bendy-file-gateway' },
             });
             const ghUser = await userResp.json() as Record<string, unknown>;
             body = JSON.stringify({

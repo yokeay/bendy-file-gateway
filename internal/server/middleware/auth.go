@@ -54,7 +54,7 @@ func adminAuth(next types.Handler, req *types.Request) types.Response {
 		return types.Error(401, "unauthorized", "missing session token", nil)
 	}
 
-	adminID, err := auth.ValidateAdminSession(sessionToken)
+	adminID, err := auth.VerifySignedToken(sessionToken)
 	if err != nil {
 		return types.Error(401, "unauthorized", err.Error(), nil)
 	}

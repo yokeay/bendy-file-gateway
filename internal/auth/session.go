@@ -1,11 +1,16 @@
 package auth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/bendy/file-gateway/internal/config"
 	"github.com/bendy/file-gateway/internal/wasm"
 )
 
@@ -61,6 +66,62 @@ func DeleteAdminSession(sessionToken string) error {
 		[]interface{}{sessionToken},
 	)
 	return err
+}
+
+// CreateSignedToken creates a signed session token (HMAC-SHA256 format: hexSig.adminID.expiryUnix).
+// This is used by the JS host's OAuth callback handler to create sessions without D1 dependency.
+func CreateSignedToken(adminID string) (string, error) {
+	secret := config.Get("SESSION_SECRET")
+	if secret == "" {
+		return "", fmt.Errorf("SESSION_SECRET not configured")
+	}
+
+	expiresAtUnix := time.Now().Add(sessionDuration).Unix()
+	payload := adminID + "." + strconv.FormatInt(expiresAtUnix, 10)
+
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	sigHex := hex.EncodeToString(mac.Sum(nil))
+
+	return sigHex + "." + adminID + "." + strconv.FormatInt(expiresAtUnix, 10), nil
+}
+
+// VerifySignedToken validates a signed session token (HMAC-SHA256 format: hexSig.adminID.expiry).
+// This is used by the auth middleware to validate sessions without D1 dependency.
+func VerifySignedToken(token string) (string, error) {
+	secret := config.Get("SESSION_SECRET")
+	if secret == "" {
+		return "", fmt.Errorf("SESSION_SECRET not configured")
+	}
+
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid session token format")
+	}
+
+	sigHex := parts[0]
+	adminID := parts[1]
+	expiresAtStr := parts[2]
+
+	expiresAtUnix, err := strconv.ParseInt(expiresAtStr, 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("invalid expiry in session token")
+	}
+
+	if time.Now().Unix() > expiresAtUnix {
+		return "", fmt.Errorf("session expired")
+	}
+
+	payload := adminID + "." + expiresAtStr
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	expectedHex := hex.EncodeToString(mac.Sum(nil))
+
+	if !hmac.Equal([]byte(sigHex), []byte(expectedHex)) {
+		return "", fmt.Errorf("invalid session signature")
+	}
+
+	return adminID, nil
 }
 
 func generateToken(length int) string {

@@ -2,6 +2,7 @@
 platforms/wasm/
 platforms/cloudflare/wasm/
 platforms/cloudflare/public/
+platforms/cloudflare/static/
 platforms/vercel/wasm/
 platforms/vercel/public/
 web/dist/

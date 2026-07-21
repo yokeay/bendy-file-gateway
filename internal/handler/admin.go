@@ -29,18 +29,16 @@ func AdminGitHubLogin(req *types.Request) types.Response {
 	}
 
 	var ghLogin string
-	var ghID int64
 	var ghName string
 	var ghAvatar string
 
 	if body.GitHubUser != nil {
 		// Pre-resolved by JS host (no fetch needed)
 		ghLogin = body.GitHubUser.Login
-		ghID = body.GitHubUser.ID
 		ghName = body.GitHubUser.Name
 		ghAvatar = body.GitHubUser.AvatarURL
 	} else if body.Code != "" {
-		// Exchange code via WASM fetch import
+		// Exchange code via WASM fetch import (only works when WASM fetch is properly wired)
 		client := auth.NewGitHubOAuthClient()
 		token, err := client.ExchangeCode(body.Code)
 		if err != nil {
@@ -51,7 +49,6 @@ func AdminGitHubLogin(req *types.Request) types.Response {
 			return types.Error(401, "auth_failed", err.Error(), nil)
 		}
 		ghLogin = ghUser.Login
-		ghID = ghUser.ID
 		ghName = ghUser.Name
 		ghAvatar = ghUser.AvatarURL
 	} else {
@@ -63,37 +60,13 @@ func AdminGitHubLogin(req *types.Request) types.Response {
 		return types.Error(403, "forbidden", "user not in admin list", nil)
 	}
 
-	// Upsert admin
-	now := time.Now().UTC().Format(time.RFC3339)
-	rows, err := wasm.DBQuery(
-		"SELECT id FROM admins WHERE github_id = ?",
-		[]interface{}{ghID},
-	)
-	if err != nil {
-		return types.InternalError("database operation failed")
-	}
-
-	var adminID string
-	if len(rows) > 0 {
-		adminID = rows[0]["id"].(string)
-		_, _ = wasm.DBExec(
-			"UPDATE admins SET name = ?, avatar_url = ?, last_login_at = ?, updated_at = ? WHERE id = ?",
-			[]interface{}{ghName, ghAvatar, now, now, adminID},
-		)
-	} else {
-		adminID = util.UUID()
-		_, err = wasm.DBExec(
-			"INSERT INTO admins (id, github_username, github_id, name, avatar_url, role, last_login_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			[]interface{}{adminID, ghLogin, ghID, ghName, ghAvatar, "admin", now, now, now},
-		)
+	// Try D1-based session creation; fall back to signed token if D1 unavailable.
+	sessionToken, err := auth.CreateAdminSession(ghLogin)
+	if err != nil || sessionToken == "" {
+		sessionToken, err = auth.CreateSignedToken(ghLogin)
 		if err != nil {
-			return types.InternalError("database operation failed")
+			return types.InternalError("failed to create session")
 		}
-	}
-
-	sessionToken, err := auth.CreateAdminSession(adminID)
-	if err != nil {
-		return types.InternalError("database operation failed")
 	}
 
 	return types.Response{
@@ -103,12 +76,12 @@ func AdminGitHubLogin(req *types.Request) types.Response {
 			"Set-Cookie":   "session_token=" + sessionToken + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=86400",
 		},
 		Body: mustMarshal(map[string]interface{}{
-			"admin": map[string]interface{}{
-				"id":              adminID,
-				"github_username": ghLogin,
-				"name":            ghName,
-				"avatar_url":      ghAvatar,
-				"role":            "admin",
+			"user": map[string]interface{}{
+				"id":         ghLogin,
+				"username":   ghLogin,
+				"name":       ghName,
+				"avatar_url": ghAvatar,
+				"role":       "admin",
 			},
 		}),
 	}
@@ -120,25 +93,12 @@ func AdminMe(req *types.Request) types.Response {
 		return types.Error(401, "unauthorized", "admin authentication required", nil)
 	}
 
-	rows, err := wasm.DBQuery(
-		"SELECT id, github_username, github_id, name, avatar_url, role, last_login_at, created_at FROM admins WHERE id = ?",
-		[]interface{}{req.AdminID},
-	)
-	if err != nil || len(rows) == 0 {
-		return types.Error(404, "not_found", "admin not found", nil)
-	}
-
-	r := rows[0]
 	return types.JSON(200, map[string]interface{}{
-		"admin": map[string]interface{}{
-			"id":              r["id"],
-			"github_username": r["github_username"],
-			"github_id":       r["github_id"],
-			"name":            r["name"],
-			"avatar_url":      r["avatar_url"],
-			"role":            r["role"],
-			"last_login_at":   r["last_login_at"],
-			"created_at":      r["created_at"],
+		"user": map[string]interface{}{
+			"id":         req.AdminID,
+			"username":   req.AdminID,
+			"avatar_url": "",
+			"role":       "admin",
 		},
 	})
 }
