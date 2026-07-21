@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 // @ts-ignore - WASM module import for wrangler
-import gatewayWasm from '../wasm/gateway.wasm';
+import gatewayWasm from './wasm/gateway.wasm';
 
 interface Env {
   DB: D1Database;
