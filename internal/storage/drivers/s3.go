@@ -7,23 +7,22 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bendy/file-gateway/internal/storage"
+	"github.com/bendy/file-gateway/internal/wasm"
 )
 
 const DriverNameS3 = "s3"
 
-// S3Driver implements storage.Driver for S3-compatible storage.
 type S3Driver struct {
 	endpoint  string
 	region    string
 	bucket    string
 	accessKey string
 	secretKey string
-	client    *http.Client
 }
 
 func init() {
@@ -40,7 +39,6 @@ func init() {
 			bucket:    cfg["bucket"],
 			accessKey: cfg["access_key"],
 			secretKey: cfg["secret_key"],
-			client:    &http.Client{Timeout: 30 * time.Second},
 		}, nil
 	})
 }
@@ -48,222 +46,169 @@ func init() {
 func (d *S3Driver) Name() string { return DriverNameS3 }
 
 func (d *S3Driver) Put(ctx context.Context, key string, body io.Reader, opts storage.UploadOptions) (storage.FileInfo, error) {
-	url := fmt.Sprintf("%s/%s/%s", d.endpoint, d.bucket, key)
-
-	// Read body for signing
 	bodyBytes, err := io.ReadAll(body)
 	if err != nil {
 		return storage.FileInfo{}, fmt.Errorf("failed to read body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return storage.FileInfo{}, err
-	}
-
+	url := d.buildURL(key)
 	contentType := opts.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	req.Header.Set("Content-Type", contentType)
+	headers := map[string]string{
+		"Content-Type": contentType,
+	}
+	d.signRequest("PUT", key, "", headers, string(bodyBytes))
 
-	// Sign the request with AWS Signature V4
-	d.signRequest(req, string(bodyBytes))
-
-	resp, err := d.client.Do(req)
+	resp, err := wasm.Fetch("PUT", url, headers, string(bodyBytes))
 	if err != nil {
 		return storage.FileInfo{}, fmt.Errorf("s3 put failed: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return storage.FileInfo{}, fmt.Errorf("s3 put error: %d - %s", resp.StatusCode, string(respBody))
+		return storage.FileInfo{}, fmt.Errorf("s3 put error: %d - %s", resp.StatusCode, resp.Body)
 	}
 
 	return storage.FileInfo{
 		Key:          key,
 		Size:         int64(len(bodyBytes)),
 		ContentType:  contentType,
-		ETag:         strings.Trim(resp.Header.Get("ETag"), "\""),
+		ETag:         resp.Headers["etag"],
 		LastModified: time.Now(),
 	}, nil
 }
 
 func (d *S3Driver) Get(ctx context.Context, key string, opts storage.DownloadOptions) (io.ReadCloser, storage.FileInfo, error) {
-	url := fmt.Sprintf("%s/%s/%s", d.endpoint, d.bucket, key)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, storage.FileInfo{}, err
-	}
-
+	url := d.buildURL(key)
+	headers := map[string]string{}
 	if opts.RangeStart > 0 || opts.RangeEnd > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", opts.RangeStart, opts.RangeEnd))
+		headers["Range"] = fmt.Sprintf("bytes=%d-%d", opts.RangeStart, opts.RangeEnd)
 	}
+	d.signRequest("GET", key, "", headers, "")
 
-	d.signRequest(req, "")
-
-	resp, err := d.client.Do(req)
+	resp, err := wasm.Fetch("GET", url, headers, "")
 	if err != nil {
 		return nil, storage.FileInfo{}, fmt.Errorf("s3 get failed: %w", err)
 	}
-
 	if resp.StatusCode >= 300 {
-		resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, storage.FileInfo{}, fmt.Errorf("s3 get error: %d - %s", resp.StatusCode, string(respBody))
+		return nil, storage.FileInfo{}, fmt.Errorf("s3 get error: %d - %s", resp.StatusCode, resp.Body)
 	}
 
+	size, _ := strconv.ParseInt(resp.Headers["content-length"], 10, 64)
 	info := storage.FileInfo{
 		Key:          key,
-		Size:         resp.ContentLength,
-		ContentType:  resp.Header.Get("Content-Type"),
-		ETag:         strings.Trim(resp.Header.Get("ETag"), "\""),
+		Size:         size,
+		ContentType:  resp.Headers["content-type"],
+		ETag:         resp.Headers["etag"],
 		LastModified: time.Now(),
 	}
-
-	return resp.Body, info, nil
+	return io.NopCloser(strings.NewReader(resp.Body)), info, nil
 }
 
 func (d *S3Driver) Head(ctx context.Context, key string) (storage.FileInfo, error) {
-	url := fmt.Sprintf("%s/%s/%s", d.endpoint, d.bucket, key)
+	url := d.buildURL(key)
+	headers := map[string]string{}
+	d.signRequest("HEAD", key, "", headers, "")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		return storage.FileInfo{}, err
-	}
-
-	d.signRequest(req, "")
-
-	resp, err := d.client.Do(req)
+	resp, err := wasm.Fetch("HEAD", url, headers, "")
 	if err != nil {
 		return storage.FileInfo{}, fmt.Errorf("s3 head failed: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode >= 300 {
 		return storage.FileInfo{}, fmt.Errorf("s3 head error: %d", resp.StatusCode)
 	}
 
+	size, _ := strconv.ParseInt(resp.Headers["content-length"], 10, 64)
 	return storage.FileInfo{
 		Key:          key,
-		Size:         resp.ContentLength,
-		ContentType:  resp.Header.Get("Content-Type"),
-		ETag:         strings.Trim(resp.Header.Get("ETag"), "\""),
+		Size:         size,
+		ContentType:  resp.Headers["content-type"],
+		ETag:         resp.Headers["etag"],
 		LastModified: time.Now(),
 	}, nil
 }
 
 func (d *S3Driver) Delete(ctx context.Context, key string) error {
-	url := fmt.Sprintf("%s/%s/%s", d.endpoint, d.bucket, key)
+	url := d.buildURL(key)
+	headers := map[string]string{}
+	d.signRequest("DELETE", key, "", headers, "")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
-	if err != nil {
-		return err
-	}
-
-	d.signRequest(req, "")
-
-	resp, err := d.client.Do(req)
+	resp, err := wasm.Fetch("DELETE", url, headers, "")
 	if err != nil {
 		return fmt.Errorf("s3 delete failed: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode >= 300 && resp.StatusCode != 404 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("s3 delete error: %d - %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("s3 delete error: %d - %s", resp.StatusCode, resp.Body)
 	}
-
 	return nil
 }
 
-func (d *S3Driver) List(ctx context.Context, prefix string, limit int, continuationToken string) ([]storage.FileInfo, string, error) {
+func (d *S3Driver) List(ctx context.Context, prefix string, limit int, ct string) ([]storage.FileInfo, string, error) {
 	url := fmt.Sprintf("%s/%s?list-type=2&prefix=%s&max-keys=%d", d.endpoint, d.bucket, prefix, limit)
-	if continuationToken != "" {
-		url += "&continuation-token=" + continuationToken
+	if ct != "" {
+		url += "&continuation-token=" + ct
 	}
+	headers := map[string]string{}
+	d.signRequest("GET", "", "list-type=2&prefix="+prefix+"&max-keys="+strconv.Itoa(limit), headers, "")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, "", err
-	}
-
-	d.signRequest(req, "")
-
-	resp, err := d.client.Do(req)
+	_, err := wasm.Fetch("GET", url, headers, "")
 	if err != nil {
 		return nil, "", fmt.Errorf("s3 list failed: %w", err)
 	}
-	defer resp.Body.Close()
-
-	// Basic XML parsing - full implementation will use a proper XML parser
-	// For now, return an empty list (will be implemented in Phase 3)
 	return []storage.FileInfo{}, "", nil
 }
 
 func (d *S3Driver) Ping(ctx context.Context) error {
 	url := fmt.Sprintf("%s/%s", d.endpoint, d.bucket)
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		return err
-	}
-	d.signRequest(req, "")
-	resp, err := d.client.Do(req)
+	headers := map[string]string{}
+	d.signRequest("HEAD", "", "", headers, "")
+
+	resp, err := wasm.Fetch("HEAD", url, headers, "")
 	if err != nil {
 		return fmt.Errorf("s3 ping failed: %w", err)
 	}
-	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("s3 ping error: %d", resp.StatusCode)
+	}
 	return nil
 }
 
-// signRequest adds AWS Signature V4 authorization headers.
-func (d *S3Driver) signRequest(req *http.Request, body string) {
+func (d *S3Driver) buildURL(key string) string {
+	return fmt.Sprintf("%s/%s/%s", d.endpoint, d.bucket, key)
+}
+
+// signRequest adds AWS Signature V4 headers.
+func (d *S3Driver) signRequest(method, path, query string, headers map[string]string, body string) {
 	t := time.Now().UTC()
 	dateStamp := t.Format("20060102")
 	amzDate := t.Format("20060102T150405Z")
-
-	// Create hashed payload
 	payloadHash := sha256Hex(body)
 
-	// Set required headers
-	req.Header.Set("Host", req.URL.Host)
-	req.Header.Set("X-Amz-Date", amzDate)
-	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	headers["Host"] = strings.TrimPrefix(strings.TrimPrefix(d.endpoint, "https://"), "http://")
+	headers["X-Amz-Date"] = amzDate
+	headers["X-Amz-Content-Sha256"] = payloadHash
 
-	// Create canonical request
 	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-		req.URL.Host, payloadHash, amzDate)
+		headers["Host"], payloadHash, amzDate)
 	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
 
+	uri := "/" + d.bucket
+	if path != "" {
+		uri += "/" + path
+	}
 	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
-		req.Method,
-		req.URL.EscapedPath(),
-		req.URL.RawQuery,
-		canonicalHeaders,
-		signedHeaders,
-		payloadHash,
-	)
+		method, uri, query, canonicalHeaders, signedHeaders, payloadHash)
 
-	// Create string to sign
 	credentialScope := fmt.Sprintf("%s/%s/s3/aws4_request", dateStamp, d.region)
 	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s\n%s",
-		amzDate,
-		credentialScope,
-		sha256Hex(canonicalRequest),
-	)
+		amzDate, credentialScope, sha256Hex(canonicalRequest))
 
-	// Calculate signing key
 	signingKey := d.getSigningKey(dateStamp)
-
-	// Calculate signature
 	signature := hmacHex(signingKey, stringToSign)
 
-	// Add authorization header
-	req.Header.Set("Authorization",
-		fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-			d.accessKey, credentialScope, signedHeaders, signature))
+	headers["Authorization"] = fmt.Sprintf(
+		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		d.accessKey, credentialScope, signedHeaders, signature)
 }
 
 func (d *S3Driver) getSigningKey(dateStamp string) []byte {

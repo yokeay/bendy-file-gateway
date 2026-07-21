@@ -51,13 +51,6 @@ func stubFactory(name string, required []string) {
 }
 
 func init() {
-	stubFactory("redis", []string{"addr", "db"})
-	stubFactory("postgres", []string{"host", "port", "database", "username", "password"})
-	stubFactory("mysql", []string{"host", "port", "database", "username", "password"})
-	stubFactory("aliyun_oss", []string{"endpoint", "bucket", "access_key_id", "access_key_secret"})
-	stubFactory("huawei_obs", []string{"endpoint", "bucket", "access_key_id", "access_key_secret"})
-	stubFactory("qiniu_kodo", []string{"access_key", "secret_key", "bucket", "domain"})
-	stubFactory("tencent_cos", []string{"region", "bucket", "secret_id", "secret_key"})
-	stubFactory("tianyi_oos", []string{"endpoint", "bucket", "access_key", "secret_key"})
-	stubFactory("unicom_oss", []string{"endpoint", "bucket", "access_key", "secret_key"})
+	// All drivers now have real implementations.
+	// stubs.go retained for future driver placeholders.
 }
