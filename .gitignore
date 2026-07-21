@@ -17,6 +17,9 @@ web/node_modules/
 .DS_Store
 Thumbs.db
 
+# TypeScript build info
+*.tsbuildinfo
+
 # Environment
 .env
 .env.local

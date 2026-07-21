@@ -1,7 +1,9 @@
 name = "bendy-file-gateway"
 main = "index.ts"
-compatibility_date = "2024-07-20"
+compatibility_date = "2025-07-21"
+compatibility_flags = ["nodejs_compat"]
 
+# Bindings
 [[d1_databases]]
 binding = "DB"
 database_name = "bendy-gateway-db"
@@ -11,6 +13,11 @@ database_id = ""
 binding = "KV"
 id = ""
 
+# Static assets (admin dashboard)
+[assets]
+directory = "./static"
+
+# Environment variables
 [vars]
 VERSION = "0.1.0"
 ADMIN_GITHUB_CLIENT_ID = ""
@@ -18,3 +25,20 @@ ADMIN_GITHUB_CLIENT_SECRET = ""
 ADMIN_GITHUB_REDIRECT_URI = ""
 ADMIN_GITHUB_USERNAMES = ""
 SESSION_SECRET = ""
+
+# Production environment overrides
+[env.production]
+name = "bendy-file-gateway-prod"
+
+[env.production.vars]
+VERSION = "0.1.0"
+
+# Routes (uncomment and configure for custom domain)
+# [[routes]]
+# pattern = "api.yourdomain.com/*"
+# zone_id = ""
+
+# Observability
+[observability]
+enabled = true
+head_sampling_rate = 0.1

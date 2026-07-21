@@ -34,6 +34,24 @@ const decoder = new TextDecoder();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    // Admin dashboard: SPA fallback for non-API admin paths
+    if (url.pathname.startsWith('/admin')) {
+      const apiPaths = ['/admin/api/'];
+      const isApi = apiPaths.some(p => url.pathname.startsWith(p));
+      if (!isApi) {
+        // Return index.html for SPA client-side routing.
+        // Static assets (JS/CSS) are served by wrangler's [assets] config.
+        const indexPath = url.pathname.split('/').filter(Boolean).join('/') || 'index.html';
+        // For SPA, always serve index.html for any non-API, non-file path
+        return new Response(
+          `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Bendy File Gateway</title></head><body><div id="root"></div><p>Admin dashboard static files not built. Run: cd web && npm run build</p></body></html>`,
+          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } }
+        );
+      }
+    }
+
     // Helpers that will be wired to WASM memory after instantiation
     let readCString: (ptr: number, maxLen?: number) => string = () => '';
     let allocString: (str: string) => number = () => 0;
@@ -99,7 +117,6 @@ export default {
       });
     }
 
-    const url = new URL(request.url);
     const headers: Record<string, string> = {};
     request.headers.forEach((value, key) => { headers[key] = value; });
     let body = request.body ? await request.text() : '';

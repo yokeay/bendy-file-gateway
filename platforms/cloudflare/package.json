@@ -1,0 +1,16 @@
+{
+  "name": "bendy-file-gateway-cf",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "deploy:production": "wrangler deploy --env production",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250720.0",
+    "wrangler": "^3.120.0"
+  }
+}
