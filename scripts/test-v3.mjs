@@ -19,6 +19,7 @@ const db = {
   admin_sessions: new Map(),
   tenant_quotas: new Map(),
   backends: new Map(),
+  directories: new Map(),
   files: new Map(),
   api_logs: new Map(),
 };
@@ -54,6 +55,11 @@ function dbExec(sql, params) {
     db.files.set(id, { id, tenant_id: tenantID, directory_id: dirID, backend_id: backendID, virtual_name: vname, storage_key: skey, content_type: ctype, size, checksum, metadata, created_at: ca, updated_at: ua });
     return { rows_affected: 1, last_insert_id: 0 };
   }
+  if (sql.includes('INSERT INTO directories')) {
+    const [id, tenantID, parentID, name, path, ca, ua] = params;
+    db.directories.set(id, { id, tenant_id: tenantID, parent_id: parentID, name, path, created_at: ca, updated_at: ua });
+    return { rows_affected: 1, last_insert_id: 0 };
+  }
   if (sql.includes('DELETE FROM tenants')) {
     const id = params[0];
     db.tenants.delete(id);
@@ -70,6 +76,10 @@ function dbExec(sql, params) {
   }
   if (sql.includes('DELETE FROM files')) {
     db.files.delete(params[0]);
+    return { rows_affected: 1, last_insert_id: 0 };
+  }
+  if (sql.includes('DELETE FROM directories')) {
+    db.directories.delete(params[0]);
     return { rows_affected: 1, last_insert_id: 0 };
   }
   if (sql.includes('UPDATE tenants SET')) {
@@ -187,7 +197,7 @@ function dbQuery(sql, paramsArray) {
   }
 
   if (sql.includes('FROM files')) {
-    if (sql.includes('WHERE id = ?')) {
+    if (sql.includes('WHERE id = ?') && !sql.includes('directory_id = ?')) {
       return [db.files.get(params[0])].filter(Boolean);
     }
     if (sql.includes('WHERE tenant_id = ?') && sql.includes('directory_id = ?')) {
@@ -195,6 +205,24 @@ function dbQuery(sql, paramsArray) {
     }
     if (sql.includes('WHERE tenant_id = ?') && sql.includes('ORDER BY')) {
       return Array.from(db.files.values()).filter(f => f.tenant_id === params[0]);
+    }
+    if (sql.includes('COUNT(*)') && sql.includes('directory_id')) {
+      return [{ count: Array.from(db.files.values()).filter(f => f.directory_id === params[0]).length }];
+    }
+  }
+
+  if (sql.includes('FROM directories')) {
+    if (sql.includes('WHERE id = ?') && sql.includes('tenant_id')) {
+      return Array.from(db.directories.values()).filter(d => d.id === params[0] && d.tenant_id === params[1]);
+    }
+    if (sql.includes('WHERE tenant_id = ?') && sql.includes('parent_id = ?')) {
+      return Array.from(db.directories.values()).filter(d => d.tenant_id === params[0] && d.parent_id === params[1]);
+    }
+    if (sql.includes('WHERE tenant_id = ?') && sql.includes('parent_id IS NULL')) {
+      return Array.from(db.directories.values()).filter(d => d.tenant_id === params[0] && !d.parent_id);
+    }
+    if (sql.includes('COUNT(*)') && sql.includes('parent_id = ?')) {
+      return [{ count: Array.from(db.directories.values()).filter(d => d.parent_id === params[0]).length }];
     }
   }
 
@@ -245,7 +273,7 @@ const memory = exports.memory;
 function readWasmStr(ptr, len) {
   const numPtr = typeof ptr === 'bigint' ? Number(ptr) : ptr;
   if (numPtr === 0) return '';
-  const bytes = new Uint8Array(memory.buffer, numPtr, len || 4096);
+  const bytes = new Uint8Array(exports.memory.buffer, numPtr, len || 4096);
   let end = 0;
   while (end < (len || 4096) && bytes[end] !== 0) end++;
   return decoder.decode(bytes.subarray(0, end));
@@ -255,7 +283,7 @@ function allocResult(str) {
   if (!str) return BigInt(0);
   const bytes = encoder.encode(str + '\0');
   const ptr = exports.malloc(bytes.length);
-  new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+  new Uint8Array(exports.memory.buffer, ptr, bytes.length).set(bytes);
   return BigInt(ptr);
 }
 
@@ -272,15 +300,15 @@ function callHandleRequest(method, path, headers, body, remoteAddr) {
   const a = encoder.encode(remoteAddr);
 
   const mPtr = exports.malloc(m.length);
-  new Uint8Array(memory.buffer, mPtr, m.length).set(m);
+  new Uint8Array(exports.memory.buffer, mPtr, m.length).set(m);
   const pPtr = exports.malloc(p.length);
-  new Uint8Array(memory.buffer, pPtr, p.length).set(p);
+  new Uint8Array(exports.memory.buffer, pPtr, p.length).set(p);
   const hPtr = exports.malloc(h.length);
-  new Uint8Array(memory.buffer, hPtr, h.length).set(h);
+  new Uint8Array(exports.memory.buffer, hPtr, h.length).set(h);
   const bPtr = exports.malloc(b.length);
-  new Uint8Array(memory.buffer, bPtr, b.length).set(b);
+  new Uint8Array(exports.memory.buffer, bPtr, b.length).set(b);
   const aPtr = exports.malloc(a.length);
-  new Uint8Array(memory.buffer, aPtr, a.length).set(a);
+  new Uint8Array(exports.memory.buffer, aPtr, a.length).set(a);
 
   const resultPtr = exports.handleRequest(
     mPtr, m.length,
@@ -538,6 +566,50 @@ if (uploadedFileId) {
   console.log('Status:', r16.status_code);
 }
 
+// ============================================================
+// Phase 4: Virtual directory operations
+// ============================================================
+
+let r17, r18, r19, r20;
+let dir1Id, dir2Id;
+
+// Test 17: Create root directory
+console.log('\n=== Test: POST /api/v1/directories (root) ===');
+r17 = callAsTenant('POST', '/api/v1/directories', JSON.stringify({ name: 'photos' }), ftAccessKey, ftSecretKey);
+console.log('Status:', r17.status_code);
+if (r17.body) {
+  const parsed = JSON.parse(r17.body);
+  dir1Id = parsed.directory?.id;
+  console.log('Directory ID:', dir1Id);
+  console.log('Path:', parsed.directory?.path);
+}
+
+// Test 18: Create nested directory
+if (dir1Id) {
+  console.log('\n=== Test: POST /api/v1/directories (nested) ===');
+  r18 = callAsTenant('POST', '/api/v1/directories', JSON.stringify({ name: '2024', parent_id: dir1Id }), ftAccessKey, ftSecretKey);
+  console.log('Status:', r18.status_code);
+  if (r18.body) {
+    const parsed = JSON.parse(r18.body);
+    dir2Id = parsed.directory?.id;
+    console.log('Nested dir ID:', dir2Id);
+    console.log('Path:', parsed.directory?.path);
+  }
+}
+
+// Test 19: List root directories
+console.log('\n=== Test: GET /api/v1/directories (root list) ===');
+r19 = callAsTenant('GET', '/api/v1/directories', '', ftAccessKey, ftSecretKey);
+console.log('Status:', r19.status_code);
+console.log('Body:', JSON.stringify(r19).substring(0, 300));
+
+// Test 20: Delete directory
+if (dir2Id) {
+  console.log('\n=== Test: DELETE /api/v1/directories (leaf) ===');
+  r20 = callAsTenant('DELETE', `/api/v1/directories?id=${dir2Id}`, '', ftAccessKey, ftSecretKey);
+  console.log('Status:', r20.status_code);
+}
+
 // Summary
 console.log('\n=== SUMMARY ===');
 const tests = [
@@ -557,6 +629,10 @@ const tests = [
   ['GET /api/files/list', r14?.status_code === 200],
   ['Cross-tenant isolation', r15?.status_code === 403],
   ['DELETE /api/files/delete', r16?.status_code === 200],
+  ['POST /api/dirs (root)', r17?.status_code === 201],
+  ['POST /api/dirs (nested)', r18?.status_code === 201],
+  ['GET /api/dirs (root list)', r19?.status_code === 200],
+  ['DELETE /api/dirs (leaf)', r20?.status_code === 200],
 ];
 let passCount = 0;
 for (const [name, pass] of tests) {

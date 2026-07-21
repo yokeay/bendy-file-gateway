@@ -45,6 +45,7 @@ type Directory struct {
 	TenantID  string    `json:"tenant_id"`
 	ParentID  *string   `json:"parent_id"`
 	Name      string    `json:"name"`
+	Path      string    `json:"path"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
