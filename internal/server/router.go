@@ -6,6 +6,14 @@ import (
 	"github.com/bendy/file-gateway/internal/types"
 )
 
+// cleanPath strips query string and trailing slash.
+func cleanPath(p string) string {
+	if idx := strings.Index(p, "?"); idx >= 0 {
+		p = p[:idx]
+	}
+	return strings.TrimRight(p, "/")
+}
+
 // Route represents a registered route.
 type Route struct {
 	Method  string
@@ -23,7 +31,7 @@ func RegisterRoute(method, pattern string, handler types.Handler) {
 // router returns the main request handler that dispatches to registered routes.
 func router() types.Handler {
 	return func(req *types.Request) types.Response {
-		path := strings.TrimRight(req.Path, "/")
+		path := cleanPath(req.Path)
 		if path == "" {
 			path = "/"
 		}

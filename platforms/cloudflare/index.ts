@@ -102,8 +102,40 @@ export default {
     const url = new URL(request.url);
     const headers: Record<string, string> = {};
     request.headers.forEach((value, key) => { headers[key] = value; });
-    const body = request.body ? await request.text() : '';
+    let body = request.body ? await request.text() : '';
     const remoteAddr = request.headers.get('cf-connecting-ip') || '127.0.0.1';
+
+    // Intercept GitHub OAuth: exchange code for user info before passing to WASM.
+    // WASM can't make async fetch calls, so we do the OAuth dance here.
+    if (url.pathname === '/admin/api/v1/auth/github' && request.method === 'POST') {
+      try {
+        const reqBody = JSON.parse(body);
+        if (reqBody.code) {
+          const tokenResp = await fetch('https://github.com/login/oauth/access_token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
+            body: `client_id=${encodeURIComponent(env.ADMIN_GITHUB_CLIENT_ID || '')}&client_secret=${encodeURIComponent(env.ADMIN_GITHUB_CLIENT_SECRET || '')}&code=${encodeURIComponent(reqBody.code)}`,
+          });
+          const tokenData = await tokenResp.json() as Record<string, unknown>;
+          if (tokenData.access_token) {
+            const userResp = await fetch('https://api.github.com/user', {
+              headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'Accept': 'application/vnd.github.v3+json' },
+            });
+            const ghUser = await userResp.json() as Record<string, unknown>;
+            body = JSON.stringify({
+              github_user: {
+                id: ghUser.id,
+                login: ghUser.login,
+                name: ghUser.name || '',
+                avatar_url: ghUser.avatar_url || '',
+              },
+            });
+          }
+        }
+      } catch {
+        // Pass through to WASM — it will return an appropriate error
+      }
+    }
 
     const writeStr = (str: string): { ptr: number; len: number } => {
       const bytes = encoder.encode(str);
