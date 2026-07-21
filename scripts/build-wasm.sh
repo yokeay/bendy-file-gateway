@@ -20,7 +20,7 @@ mkdir -p "$WASM_OUT_DIR"
 # -no-debug strips DWARF sections for smaller binary
 # -panic=trap converts panics to traps
 tinygo build \
-  -target wasm \
+  -target wasi \
   -no-debug \
   -panic=trap \
   -o "$WASM_OUT_DIR/gateway.wasm" \

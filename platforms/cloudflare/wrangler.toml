@@ -30,8 +30,22 @@ SESSION_SECRET = "be120724aab8c5b5ff693e91482af1956cbb72c22126b0e72901e1ade8236d
 [env.production]
 name = "bendy-file-gateway-prod"
 
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "bendy-gateway-db"
+database_id = "18ec27d6-1624-4981-ab70-ae7d4b4d48c8"
+
+[[env.production.kv_namespaces]]
+binding = "KV"
+id = "1282383efa694275b8e64484d32f71f4"
+
 [env.production.vars]
 VERSION = "0.1.0"
+ADMIN_GITHUB_CLIENT_ID = "Ov23lisZnX1bjNoNGnU6"
+ADMIN_GITHUB_CLIENT_SECRET = "3c4467309d04ae67ea6834f70b4dbcbaddfade47"
+ADMIN_GITHUB_REDIRECT_URI = "https://bendy-file-gateway-prod.dabendi66.workers.dev/admin"
+ADMIN_GITHUB_USERNAMES = "yokeay"
+SESSION_SECRET = "be120724aab8c5b5ff693e91482af1956cbb72c22126b0e72901e1ade8236df5"
 
 # Routes (uncomment and configure for custom domain)
 # [[routes]]

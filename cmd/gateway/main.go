@@ -25,7 +25,4 @@ func main() {
 
 	// Signal ready to JS host
 	wasm.Ready()
-
-	// Keep alive
-	select {}
 }

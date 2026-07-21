@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
-// @ts-ignore - WASM module import for wrangler
-import gatewayWasm from '../wasm/gateway.wasm';
+// @ts-ignore - WASM module import
+import gatewayWasm from './wasm/gateway.wasm';
 
 interface Env {
   DB: D1Database;
@@ -16,10 +16,10 @@ interface Env {
 
 interface WASMExports {
   memory: WebAssembly.Memory;
-  _start?: () => void;
-  _initialize?: () => void;
+  _start: () => void;
   ready: () => number;
   malloc: (size: number) => number;
+  free: (ptr: number) => void;
   handleRequest: (
     methodPtr: number, methodLen: number,
     pathPtr: number, pathLen: number,
@@ -34,27 +34,25 @@ const decoder = new TextDecoder();
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const url = new URL(request.url);
+    // --- Mutable state shared via closures ---
+    let memBuf: ArrayBuffer;
+    let wasmExports: WASMExports;
+    let ioLog = '';
 
-    // Admin dashboard: SPA fallback for non-API admin paths
-    if (url.pathname.startsWith('/admin')) {
-      const apiPaths = ['/admin/api/'];
-      const isApi = apiPaths.some(p => url.pathname.startsWith(p));
-      if (!isApi) {
-        // Return index.html for SPA client-side routing.
-        // Static assets (JS/CSS) are served by wrangler's [assets] config.
-        const indexPath = url.pathname.split('/').filter(Boolean).join('/') || 'index.html';
-        // For SPA, always serve index.html for any non-API, non-file path
-        return new Response(
-          `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Bendy File Gateway</title></head><body><div id="root"></div><p>Admin dashboard static files not built. Run: cd web && npm run build</p></body></html>`,
-          { status: 200, headers: { 'content-type': 'text/html; charset=utf-8' } }
-        );
-      }
+    // --- Helper functions ---
+    function readStr(ptr: number, maxLen: number = 65536): string {
+      const buf = new Uint8Array(memBuf, ptr, maxLen);
+      let end = 0;
+      while (end < maxLen && buf[end] !== 0) end++;
+      return decoder.decode(buf.subarray(0, end));
     }
 
-    // Helpers that will be wired to WASM memory after instantiation
-    let readCString: (ptr: number, maxLen?: number) => string = () => '';
-    let allocString: (str: string) => number = () => 0;
+    function allocStr(str: string): number {
+      const bytes = encoder.encode(str + '\0');
+      const ptr = wasmExports.malloc(bytes.length);
+      new Uint8Array(memBuf, ptr, bytes.length).set(bytes);
+      return ptr;
+    }
 
     const envMap: Record<string, string> = {
       GITHUB_CLIENT_ID: env.ADMIN_GITHUB_CLIENT_ID || '',
@@ -65,65 +63,118 @@ export default {
       VERSION: env.VERSION || '0.1.0',
     };
 
-    // The WASM binary defines and exports its own memory (does NOT import env.memory)
-    const mod = await WebAssembly.instantiate(gatewayWasm, {
-      env: {
-        dbQuery: (_sp: number, _sl: number, _pp: number, _pl: number): bigint => BigInt(0),
-        dbExec: (_sp: number, _sl: number, _pp: number, _pl: number): bigint => {
-          return BigInt(allocString('{"rows_affected":0,"last_insert_id":0}'));
-        },
-        cacheGet: (_kp: number, _kl: number): bigint => BigInt(0),
-        cacheSet: (_kp: number, _kl: number, _vp: number, _vl: number, _t: number): void => {},
-        cacheDel: (_kp: number, _kl: number): void => {},
-        envGet: (keyPtr: number, _keyLen: number): bigint => {
-          const key = readCString(keyPtr);
-          const val = envMap[key] || '';
-          if (!val) return BigInt(0);
-          return BigInt(allocString(val));
-        },
-        fetch: (_mp: number, _ml: number, _up: number, _ul: number, _hp: number, _hl: number, _bp: number, _bl: number): bigint => {
-          return BigInt(allocString('{"status_code":500,"headers":{},"body":"fetch not available in WASM import"}'));
-        },
+    // --- WASI import shims ---
+    const wasiImports = {
+      clock_time_get(_id: number, _precision: bigint, timePtr: number): number {
+        new DataView(memBuf).setBigUint64(timePtr, BigInt(Date.now()) * 1_000_000n, true);
+        return 0;
       },
-    });
-
-    const exports = mod.instance.exports as unknown as WASMExports;
-    const mem = exports.memory;
-
-    // Wire helpers to use WASM's actual memory
-    readCString = (ptr: number, maxLen: number = 65536): string => {
-      if (ptr === 0) return '';
-      const view = new Uint8Array(mem.buffer, ptr, maxLen);
-      let len = 0;
-      while (len < maxLen && view[len] !== 0) len++;
-      return decoder.decode(view.subarray(0, len));
+      args_sizes_get(argcPtr: number, argvBufSizePtr: number): number {
+        const v = new DataView(memBuf);
+        v.setUint32(argcPtr, 0, true);
+        v.setUint32(argvBufSizePtr, 0, true);
+        return 0;
+      },
+      args_get(_argv: number, _argvBuf: number): number { return 0; },
+      fd_close(_fd: number): number { return 0; },
+      fd_read(_fd: number, _iovs: number, _iovsLen: number, _nwritten: number): number { return 8; },
+      fd_write(fd: number, iovs: number, iovsLen: number, nwritten: number): number {
+        if (fd !== 1 && fd !== 2) return 8;
+        let total = 0;
+        const dv = new DataView(memBuf);
+        for (let i = 0; i < iovsLen; i++) {
+          const ptr = dv.getUint32(iovs + i * 8, true);
+          const len = dv.getUint32(iovs + i * 8 + 4, true);
+          ioLog += decoder.decode(new Uint8Array(memBuf, ptr, len));
+          total += len;
+        }
+        if (ioLog.length > 0 && (ioLog.includes('\n') || ioLog.length > 1024)) {
+          console.log(ioLog); ioLog = '';
+        }
+        dv.setUint32(nwritten, total, true);
+        return 0;
+      },
+      random_get(buf: number, bufLen: number): number {
+        const bytes = new Uint8Array(bufLen);
+        crypto.getRandomValues(bytes);
+        new Uint8Array(memBuf, buf, bufLen).set(bytes);
+        return 0;
+      },
     };
 
-    allocString = (str: string): number => {
-      const bytes = encoder.encode(str + '\0');
-      const ptr = exports.malloc(bytes.length);
-      new Uint8Array(mem.buffer, ptr, bytes.length).set(bytes);
-      return ptr;
+    // --- Env import stubs (closures over mutable memBuf/wasmExports) ---
+    const envImports = {
+      dbQuery(sqlPtr: number, sqlLen: number, paramsPtr: number, paramsLen: number): bigint {
+        // D1 queries are async — can't be called from sync WASM import.
+        // For health endpoint, this isn't called.
+        return BigInt(allocStr('[]'));
+      },
+      dbExec(sqlPtr: number, sqlLen: number, paramsPtr: number, paramsLen: number): bigint {
+        return BigInt(allocStr(JSON.stringify({ rows_affected: 0, last_insert_id: 0 })));
+      },
+      cacheGet(keyPtr: number, keyLen: number): bigint {
+        return BigInt(0); // not found
+      },
+      cacheSet(keyPtr: number, keyLen: number, valuePtr: number, valueLen: number, ttlSeconds: number): void {},
+      cacheDel(keyPtr: number, keyLen: number): void {},
+      envGet(keyPtr: number, keyLen: number): bigint {
+        const key = readStr(keyPtr);
+        const val = envMap[key] || '';
+        if (!val) return BigInt(0);
+        return BigInt(allocStr(val));
+      },
+      fetch(methodPtr: number, methodLen: number, urlPtr: number, urlLen: number, headersPtr: number, headersLen: number, bodyPtr: number, bodyLen: number): bigint {
+        // async fetch not available in sync WASM import
+        return BigInt(allocStr(JSON.stringify({ status_code: 502, headers: {}, body: 'fetch not available in sync context' })));
+      },
     };
 
-    // Initialize Go runtime (runs main() which sets up handlers and calls select{})
-    const initFn = exports._initialize || exports._start;
-    if (initFn) initFn();
-
-    if (exports.ready() !== 1) {
-      return new Response(JSON.stringify({ status: 'error', message: 'WASM not ready' }), {
-        status: 503,
-        headers: { 'content-type': 'application/json' },
+    // --- Instantiate WASM ---
+    let instance: WebAssembly.Instance;
+    try {
+      instance = (await WebAssembly.instantiate(gatewayWasm, {
+        wasi_snapshot_preview1: wasiImports,
+        env: envImports,
+      })).instance;
+    } catch (e: any) {
+      return new Response(JSON.stringify({ status: 'error', message: `WASM instantiate failed: ${e.message || e}` }), {
+        status: 500, headers: { 'content-type': 'application/json' },
       });
     }
 
-    const headers: Record<string, string> = {};
-    request.headers.forEach((value, key) => { headers[key] = value; });
-    let body = request.body ? await request.text() : '';
-    const remoteAddr = request.headers.get('cf-connecting-ip') || '127.0.0.1';
+    wasmExports = instance.exports as unknown as WASMExports;
+    memBuf = wasmExports.memory.buffer;
 
-    // Intercept GitHub OAuth: exchange code for user info before passing to WASM.
-    // WASM can't make async fetch calls, so we do the OAuth dance here.
+    // --- Initialize Go runtime ---
+    try {
+      wasmExports._start();
+    } catch (e: any) {
+      return new Response(JSON.stringify({ status: 'error', message: `WASM _start failed: ${e.message || e}` }), {
+        status: 500, headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    // Flush any log output
+    if (ioLog) { console.log(ioLog); ioLog = ''; }
+
+    if (wasmExports.ready() !== 1) {
+      return new Response(JSON.stringify({ status: 'error', message: 'WASM not ready' }), {
+        status: 503, headers: { 'content-type': 'application/json' },
+      });
+    }
+
+    // --- Routing ---
+    const url = new URL(request.url);
+
+    // Admin SPA fallback
+    if (url.pathname.startsWith('/admin') && !url.pathname.startsWith('/admin/api/')) {
+      return new Response(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Bendy File Gateway</title></head><body><div id="root"></div><p>Admin dashboard static files not built. Run: cd web && npm run build</p></body></html>`, {
+        status: 200, headers: { 'content-type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    // GitHub OAuth intercept
+    let body = await request.text() || '';
     if (url.pathname === '/admin/api/v1/auth/github' && request.method === 'POST') {
       try {
         const reqBody = JSON.parse(body);
@@ -140,36 +191,38 @@ export default {
             });
             const ghUser = await userResp.json() as Record<string, unknown>;
             body = JSON.stringify({
-              github_user: {
-                id: ghUser.id,
-                login: ghUser.login,
-                name: ghUser.name || '',
-                avatar_url: ghUser.avatar_url || '',
-              },
+              github_user: { id: ghUser.id, login: ghUser.login, name: ghUser.name || '', avatar_url: ghUser.avatar_url || '' },
             });
           }
         }
-      } catch {
-        // Pass through to WASM — it will return an appropriate error
-      }
+      } catch { /* pass through */ }
     }
 
-    const writeStr = (str: string): { ptr: number; len: number } => {
-      const bytes = encoder.encode(str);
-      const ptr = exports.malloc(bytes.length);
-      new Uint8Array(mem.buffer, ptr, bytes.length).set(bytes);
-      return { ptr, len: bytes.length };
-    };
+    // Collect headers
+    const reqHeaders: Record<string, string> = {};
+    request.headers.forEach((value, key) => { reqHeaders[key] = value; });
+    const remoteAddr = request.headers.get('cf-connecting-ip') || '127.0.0.1';
 
-    const m = writeStr(request.method);
-    const p = writeStr(url.pathname);
-    const h = writeStr(JSON.stringify(headers));
-    const b = writeStr(body);
-    const a = writeStr(remoteAddr);
+    // Pass to WASM
+    const m = allocStr(request.method);
+    const p = allocStr(url.pathname);
+    const h = allocStr(JSON.stringify(reqHeaders));
+    const b = allocStr(body);
+    const a = allocStr(remoteAddr);
 
-    const resultPtr = exports.handleRequest(m.ptr, m.len, p.ptr, p.len, h.ptr, h.len, b.ptr, b.len, a.ptr, a.len);
+    let resultJSON: string;
+    try {
+      const retPtr = Number(wasmExports.handleRequest(
+        m, request.method.length, p, url.pathname.length,
+        h, JSON.stringify(reqHeaders).length, b, body.length, a, remoteAddr.length,
+      ));
+      resultJSON = readStr(retPtr);
+    } catch (e: any) {
+      return new Response(JSON.stringify({ status: 'error', message: `handleRequest failed: ${e.message || e}` }), {
+        status: 500, headers: { 'content-type': 'application/json' },
+      });
+    }
 
-    const resultJSON = readCString(Number(resultPtr));
     let result: { status_code?: number; headers?: Record<string, string>; body?: string };
     try {
       result = JSON.parse(resultJSON);
