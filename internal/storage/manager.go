@@ -89,6 +89,15 @@ func (m *Manager) Delete(ctx context.Context, backendID, key string) error {
 	return d.Delete(ctx, key)
 }
 
+// List returns files from the specified backend matching a prefix.
+func (m *Manager) List(ctx context.Context, backendID, prefix string, limit int, continuationToken string) ([]FileInfo, string, error) {
+	d, err := m.getDriver(backendID)
+	if err != nil {
+		return nil, "", err
+	}
+	return d.List(ctx, prefix, limit, continuationToken)
+}
+
 // Ping checks connectivity to a backend.
 func (m *Manager) Ping(ctx context.Context, backendID string) error {
 	d, err := m.getDriver(backendID)

@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createHmac, createHash } from 'crypto';
 import './wasm_exec.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +19,7 @@ const db = {
   admin_sessions: new Map(),
   tenant_quotas: new Map(),
   backends: new Map(),
+  files: new Map(),
   api_logs: new Map(),
 };
 
@@ -47,6 +49,11 @@ function dbExec(sql, params) {
     db.backends.set(id, { id, tenant_id: tenantID, name, driver, config, is_default: isDefault, status, created_at: ca, updated_at: ua });
     return { rows_affected: 1, last_insert_id: 0 };
   }
+  if (sql.includes('INSERT INTO files')) {
+    const [id, tenantID, dirID, backendID, vname, skey, ctype, size, checksum, metadata, ca, ua] = params;
+    db.files.set(id, { id, tenant_id: tenantID, directory_id: dirID, backend_id: backendID, virtual_name: vname, storage_key: skey, content_type: ctype, size, checksum, metadata, created_at: ca, updated_at: ua });
+    return { rows_affected: 1, last_insert_id: 0 };
+  }
   if (sql.includes('DELETE FROM tenants')) {
     const id = params[0];
     db.tenants.delete(id);
@@ -59,6 +66,10 @@ function dbExec(sql, params) {
   }
   if (sql.includes('DELETE FROM backends')) {
     db.backends.delete(params[0]);
+    return { rows_affected: 1, last_insert_id: 0 };
+  }
+  if (sql.includes('DELETE FROM files')) {
+    db.files.delete(params[0]);
     return { rows_affected: 1, last_insert_id: 0 };
   }
   if (sql.includes('UPDATE tenants SET')) {
@@ -164,8 +175,26 @@ function dbQuery(sql, paramsArray) {
   }
 
   if (sql.includes('FROM backends')) {
+    if (sql.includes('WHERE tenant_id = ?') && sql.includes('is_default')) {
+      return Array.from(db.backends.values()).filter(b => b.tenant_id === params[0] && b.is_default === 1 && b.status === 'active');
+    }
     if (sql.includes('WHERE tenant_id = ?')) {
       return Array.from(db.backends.values()).filter(b => b.tenant_id === params[0]);
+    }
+    if (sql.includes('WHERE id = ?')) {
+      return Array.from(db.backends.values()).filter(b => b.id === params[0] && b.status === 'active');
+    }
+  }
+
+  if (sql.includes('FROM files')) {
+    if (sql.includes('WHERE id = ?')) {
+      return [db.files.get(params[0])].filter(Boolean);
+    }
+    if (sql.includes('WHERE tenant_id = ?') && sql.includes('directory_id = ?')) {
+      return Array.from(db.files.values()).filter(f => f.tenant_id === params[0] && f.directory_id === params[1]);
+    }
+    if (sql.includes('WHERE tenant_id = ?') && sql.includes('ORDER BY')) {
+      return Array.from(db.files.values()).filter(f => f.tenant_id === params[0]);
     }
   }
 
@@ -374,14 +403,140 @@ if (tenantId) {
 }
 
 // Test 9: Tenant API (no auth) - should still be 401
-console.log('\n=== Test: POST /api/v1/files/upload (no auth) ===');
-const r9 = callHandleRequest('POST', '/api/v1/files/upload', {}, '', '127.0.0.1');
+console.log('\n=== Test: GET /api/v1/files/list (no auth) ===');
+const r9 = callHandleRequest('GET', '/api/v1/files/list', {}, '', '127.0.0.1');
 console.log('Status:', r9.status_code);
 
 // Test 10: Admin auth required (no cookie)
 console.log('\n=== Test: GET /admin/api/v1/tenants (no auth) ===');
 const r10 = callHandleRequest('GET', '/admin/api/v1/tenants', {}, '', '127.0.0.1');
 console.log('Status:', r10.status_code);
+
+// ============================================================
+// Phase 3: File operations with HMAC auth
+// ============================================================
+
+// Crypto helpers for HMAC-SHA256 auth
+function hmacSign(key, message) {
+  return createHmac('sha256', key).update(message).digest('hex');
+}
+
+function sha256Hex(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+// Create a tenant with memory backend for file testing
+console.log('\n=== Setup: Create file-test tenant + memory backend ===');
+const ftCreate = callAsAdmin('POST', '/admin/api/v1/tenants', JSON.stringify({ name: 'FileTest' }));
+const ftParsed = JSON.parse(ftCreate.body);
+const ftTenantId = ftParsed.tenant.id;
+const ftAccessKey = ftParsed.tenant.access_key;
+const ftSecretKey = ftParsed.tenant.secret_key;
+console.log('File test tenant ID:', ftTenantId);
+
+// Compute secret_key_hash (same formula as Go: HMAC-SHA256(key=secret_key, msg=secret_key))
+const secretKeyHash = hmacSign(ftSecretKey, ftSecretKey);
+
+// Store the hash in the mock DB (admin.go normally does this, but we need to update the record)
+db.tenants.get(ftTenantId).secret_key_hash = secretKeyHash;
+
+// Create memory backend for the file test tenant
+const ftBackend = callAsAdmin('POST', '/admin/api/v1/tenants/backends', JSON.stringify({
+  tenant_id: ftTenantId,
+  name: 'Memory Backend',
+  driver: 'memory',
+  config: {},
+  is_default: true,
+}));
+const ftBackendParsed = JSON.parse(ftBackend.body);
+const ftBackendId = ftBackendParsed.backend.id;
+console.log('Memory backend ID:', ftBackendId);
+
+// Helper: call as tenant with HMAC auth
+function callAsTenant(method, path, bodyStr, accessKey, secretKey) {
+  const timestamp = new Date().toISOString();
+  const contentSha = sha256Hex(bodyStr);
+  const stringToSign = `${method}\n${path}\n${timestamp}\n${contentSha}`;
+  const secretHash = hmacSign(secretKey, secretKey);
+  const signature = hmacSign(secretHash, stringToSign);
+
+  return callHandleRequest(method, path, {
+    authorization: `HMAC-SHA256 ${accessKey}:${signature}`,
+    'x-bendy-timestamp': timestamp,
+  }, bodyStr, '127.0.0.1');
+}
+
+let r11, r12, r13, r14, r15, r16;
+let uploadedFileId;
+
+// Test 11: Upload file (authenticated tenant)
+console.log('\n=== Test: POST /api/v1/files/upload (authenticated) ===');
+const testFileData = Buffer.from('Hello, Bendy File Gateway!').toString('base64');
+r11 = callAsTenant('POST', '/api/v1/files/upload', JSON.stringify({
+  virtual_name: 'hello.txt',
+  content_type: 'text/plain',
+  file_data: testFileData,
+}), ftAccessKey, ftSecretKey);
+console.log('Status:', r11.status_code);
+if (r11.body) {
+  const parsed = JSON.parse(r11.body);
+  uploadedFileId = parsed.file?.id;
+  console.log('Uploaded file ID:', uploadedFileId);
+  console.log('Size:', parsed.file?.size);
+  console.log('Checksum:', parsed.file?.checksum);
+}
+
+// Test 12: Get file info
+if (uploadedFileId) {
+  console.log('\n=== Test: GET /api/v1/files/info ===');
+  r12 = callAsTenant('GET', `/api/v1/files/info?id=${uploadedFileId}`, '', ftAccessKey, ftSecretKey);
+  console.log('Status:', r12.status_code);
+  console.log('Body:', JSON.stringify(r12).substring(0, 300));
+}
+
+// Test 13: Download file
+if (uploadedFileId) {
+  console.log('\n=== Test: GET /api/v1/files/download ===');
+  r13 = callAsTenant('GET', `/api/v1/files/download?id=${uploadedFileId}`, '', ftAccessKey, ftSecretKey);
+  console.log('Status:', r13.status_code);
+  console.log('Body:', r13.body);
+}
+
+// Test 14: List files
+console.log('\n=== Test: GET /api/v1/files/list ===');
+r14 = callAsTenant('GET', '/api/v1/files/list', '', ftAccessKey, ftSecretKey);
+console.log('Status:', r14.status_code);
+console.log('Body:', JSON.stringify(r14).substring(0, 300));
+
+// Test 15: Upload file fails for wrong tenant (cross-tenant isolation)
+console.log('\n=== Test: Cross-tenant upload should fail ===');
+const wrongTenant = callAsAdmin('POST', '/admin/api/v1/tenants', JSON.stringify({ name: 'WrongTenant' }));
+const wrongParsed = JSON.parse(wrongTenant.body);
+const wrongAccessKey = wrongParsed.tenant.access_key;
+const wrongSecretKey = wrongParsed.tenant.secret_key;
+// Store the hash in mock DB
+db.tenants.get(wrongParsed.tenant.id).secret_key_hash = hmacSign(wrongSecretKey, wrongSecretKey);
+// Create backend for wrong tenant too
+callAsAdmin('POST', '/admin/api/v1/tenants/backends', JSON.stringify({
+  tenant_id: wrongParsed.tenant.id,
+  name: 'Wrong Backend',
+  driver: 'memory',
+  config: {},
+  is_default: true,
+}));
+
+// Try to access the first tenant's file with the wrong tenant's credentials
+if (uploadedFileId) {
+  r15 = callAsTenant('GET', `/api/v1/files/info?id=${uploadedFileId}`, '', wrongAccessKey, wrongSecretKey);
+  console.log('Status:', r15.status_code, '(expected 403)');
+}
+
+// Test 16: Delete file
+if (uploadedFileId) {
+  console.log('\n=== Test: DELETE /api/v1/files/delete ===');
+  r16 = callAsTenant('DELETE', `/api/v1/files/delete?id=${uploadedFileId}`, '', ftAccessKey, ftSecretKey);
+  console.log('Status:', r16.status_code);
+}
 
 // Summary
 console.log('\n=== SUMMARY ===');
@@ -394,9 +549,18 @@ const tests = [
   ['GET /admin/tenants/quota', r6?.status_code === 200],
   ['PATCH /admin/tenants/quota', r7?.status_code === 200],
   ['POST /admin/tenants/backends', r8?.status_code === 201],
-  ['POST /api/files/upload (no auth)', r9.status_code === 401],
+  ['GET /api/files/list (no auth)', r9.status_code === 401],
   ['GET /admin/tenants (no auth)', r10.status_code === 401],
+  ['POST /api/files/upload (auth)', r11?.status_code === 201],
+  ['GET /api/files/info', r12?.status_code === 200],
+  ['GET /api/files/download', r13?.status_code === 200],
+  ['GET /api/files/list', r14?.status_code === 200],
+  ['Cross-tenant isolation', r15?.status_code === 403],
+  ['DELETE /api/files/delete', r16?.status_code === 200],
 ];
+let passCount = 0;
 for (const [name, pass] of tests) {
   console.log(pass ? '  PASS' : '  FAIL', name);
+  if (pass) passCount++;
 }
+console.log(`\n${passCount}/${tests.length} tests passed`);
