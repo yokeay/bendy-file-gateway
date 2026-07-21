@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - cf
-      - cf-*
     paths:
       - 'cmd/**'
       - 'internal/**'
@@ -15,7 +14,7 @@ on:
   workflow_dispatch:
 
 env:
-  TINYGO_VERSION: '0.36.1'
+  TINYGO_VERSION: '0.34.0'
 
 jobs:
   build-and-deploy:
@@ -73,19 +72,9 @@ jobs:
           echo "WASM build successful"
 
       - name: Deploy to Cloudflare Workers
-        if: github.ref == 'refs/heads/cf'
         run: |
           cd platforms/cloudflare
           npx wrangler deploy --env production
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-
-      - name: Deploy to Cloudflare Workers (Preview)
-        if: github.ref != 'refs/heads/cf'
-        run: |
-          cd platforms/cloudflare
-          npx wrangler deploy --env production --dry-run
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
