@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bendy/file-gateway/internal/model"
+	"github.com/bendy/file-gateway/internal/quota"
 	"github.com/bendy/file-gateway/internal/storage"
 	"github.com/bendy/file-gateway/internal/types"
 	"github.com/bendy/file-gateway/internal/util"
@@ -39,6 +40,11 @@ func UploadFile(req *types.Request) types.Response {
 	fileBytes, err := base64.StdEncoding.DecodeString(body.FileData)
 	if err != nil {
 		return types.Error(400, "bad_request", "invalid base64 file_data", nil)
+	}
+
+	// Check storage quota before uploading
+	if err := quota.CheckStorageQuota(req.TenantID, int64(len(fileBytes))); err != nil {
+		return types.Error(413, "storage_quota_exceeded", err.Error(), nil)
 	}
 
 	// Resolve backend
@@ -92,6 +98,9 @@ func UploadFile(req *types.Request) types.Response {
 		_ = storage.GetManager().Delete(ctx, backendID, storageKey)
 		return types.Error(500, "db_error", "failed to save file record", nil)
 	}
+
+	// Track storage usage
+	_ = quota.AdjustStorageUsed(req.TenantID, info.Size)
 
 	return types.JSON(201, map[string]interface{}{
 		"file": map[string]interface{}{
@@ -239,6 +248,9 @@ func DeleteFile(req *types.Request) types.Response {
 	if err != nil {
 		return types.Error(500, "db_error", err.Error(), nil)
 	}
+
+	// Release storage quota
+	_ = quota.AdjustStorageUsed(req.TenantID, -file.Size)
 
 	return types.JSON(200, map[string]interface{}{"deleted": true})
 }

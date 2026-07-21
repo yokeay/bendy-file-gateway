@@ -60,6 +60,11 @@ function dbExec(sql, params) {
     db.directories.set(id, { id, tenant_id: tenantID, parent_id: parentID, name, path, created_at: ca, updated_at: ua });
     return { rows_affected: 1, last_insert_id: 0 };
   }
+  if (sql.includes('INSERT INTO api_logs')) {
+    const [id, tenantID, method, path, statusCode, trafficBytes, durationMs, remoteAddr, createdAt] = params;
+    db.api_logs.set(id, { id, tenant_id: tenantID, method, path, status_code: statusCode, traffic_bytes: trafficBytes, duration_ms: durationMs, remote_addr: remoteAddr, created_at: createdAt });
+    return { rows_affected: 1, last_insert_id: 0 };
+  }
   if (sql.includes('DELETE FROM tenants')) {
     const id = params[0];
     db.tenants.delete(id);
@@ -103,11 +108,41 @@ function dbExec(sql, params) {
     }
     return { rows_affected: 1, last_insert_id: 0 };
   }
-  if (sql.includes('UPDATE tenant_quotas SET')) {
+  if (sql.includes('UPDATE tenant_quotas')) {
+    if (sql.includes('api_calls_used = api_calls_used')) {
+      // DeductQuota: [callCount, trafficBytes, now, tenantID, callCount, trafficBytes]
+      const callCount = params[0];
+      const trafficBytes = params[1];
+      const now = params[2];
+      const tenantId = params[3];
+      const quota = db.tenant_quotas.get(tenantId);
+      if (quota) {
+        if (quota.api_calls_limit > 0 && quota.api_calls_used + callCount > quota.api_calls_limit) return { rows_affected: 0, last_insert_id: 0 };
+        if (quota.traffic_limit > 0 && quota.traffic_used + trafficBytes > quota.traffic_limit) return { rows_affected: 0, last_insert_id: 0 };
+        quota.api_calls_used += callCount;
+        quota.traffic_used += trafficBytes;
+        quota.updated_at = now;
+      }
+      return { rows_affected: 1, last_insert_id: 0 };
+    }
+    if (sql.includes('storage_used = storage_used')) {
+      // AdjustStorageUsed: [delta, now, tenantID, delta]
+      const delta = params[0];
+      const now = params[1];
+      const tenantId = params[2];
+      const quota = db.tenant_quotas.get(tenantId);
+      if (quota) {
+        if (quota.storage_limit > 0 && quota.storage_used + delta > quota.storage_limit) return { rows_affected: 0, last_insert_id: 0 };
+        if (delta < 0 && quota.storage_used + delta < 0) quota.storage_used = 0;
+        else quota.storage_used += delta;
+        quota.updated_at = now;
+      }
+      return { rows_affected: 1, last_insert_id: 0 };
+    }
+    // Admin setting limits pattern
     const tenantId = params[params.length - 1];
     const quota = db.tenant_quotas.get(tenantId);
     if (quota) {
-      // Update the fields based on SQL
       if (sql.includes('traffic_limit = ?')) quota.traffic_limit = params[0];
       if (sql.includes('api_calls_limit = ?')) quota.api_calls_limit = params[0];
       if (sql.includes('storage_limit = ?')) quota.storage_limit = params[0];
@@ -610,6 +645,56 @@ if (dir2Id) {
   console.log('Status:', r20.status_code);
 }
 
+// ============================================================
+// Phase 5: Quota enforcement tests
+// ============================================================
+
+let q1, q2, q3;
+
+// Test 21: API call limit exceeded → 429
+console.log('\n=== Test: API call limit exceeded → 429 ===');
+// Set api_calls_limit to 1 on file-test tenant
+callAsAdmin('PATCH', `/admin/api/v1/tenants/quota?tenant_id=${ftTenantId}`, JSON.stringify({ api_calls_limit: 1 }));
+// Reset used counter directly in mock DB (admin API doesn't set usage counters)
+const ftQuota = db.tenant_quotas.get(ftTenantId);
+ftQuota.api_calls_used = 0;
+ftQuota.traffic_used = 0;
+// First request should succeed (used 0 < limit 1)
+q1 = callAsTenant('GET', '/api/v1/files/list', '', ftAccessKey, ftSecretKey);
+console.log('Request 1 status:', q1.status_code, '(expected 200)');
+// Second request should hit 429 (used 1 >= limit 1)
+q1 = callAsTenant('GET', '/api/v1/files/list', '', ftAccessKey, ftSecretKey);
+console.log('Request 2 status:', q1.status_code, '(expected 429)');
+
+// Test 22: Storage limit exceeded → 413
+console.log('\n=== Test: Storage limit exceeded → 413 ===');
+// Set storage_limit to 10 bytes
+callAsAdmin('PATCH', `/admin/api/v1/tenants/quota?tenant_id=${ftTenantId}`, JSON.stringify({ storage_limit: 10 }));
+ftQuota.storage_used = 0;
+ftQuota.api_calls_used = 0;
+ftQuota.api_calls_limit = 0; // Disable API call limit for this test
+// Try to upload a file larger than 10 bytes
+const bigFileData = Buffer.from('This file is way bigger than 10 bytes!').toString('base64');
+q2 = callAsTenant('POST', '/api/v1/files/upload', JSON.stringify({
+  virtual_name: 'big.txt',
+  content_type: 'text/plain',
+  file_data: bigFileData,
+}), ftAccessKey, ftSecretKey);
+console.log('Upload status:', q2.status_code, '(expected 413)');
+
+// Test 23: Verify api_logs entries were written
+console.log('\n=== Test: API logs recorded ===');
+// Reset limits to allow normal operation and make a request
+ftQuota.api_calls_limit = 0;
+ftQuota.api_calls_used = 0;
+q3 = callAsTenant('GET', '/api/v1/files/list', '', ftAccessKey, ftSecretKey);
+console.log('Request status:', q3.status_code);
+const logEntries = Array.from(db.api_logs.values());
+console.log('api_logs entries:', logEntries.length);
+for (const entry of logEntries) {
+  console.log(`  ${entry.method} ${entry.path} → ${entry.status_code} (${entry.duration_ms}ms, ${entry.traffic_bytes}B)`);
+}
+
 // Summary
 console.log('\n=== SUMMARY ===');
 const tests = [
@@ -633,6 +718,9 @@ const tests = [
   ['POST /api/dirs (nested)', r18?.status_code === 201],
   ['GET /api/dirs (root list)', r19?.status_code === 200],
   ['DELETE /api/dirs (leaf)', r20?.status_code === 200],
+  ['API call limit 429', q1?.status_code === 429],
+  ['Storage limit 413', q2?.status_code === 413],
+  ['API logs recorded', db.api_logs.size > 0],
 ];
 let passCount = 0;
 for (const [name, pass] of tests) {

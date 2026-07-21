@@ -54,14 +54,21 @@ func Quota() types.Middleware {
 			req.QuotaData = q
 
 			// Execute handler
+			start := time.Now()
 			resp := next(req)
+			duration := time.Since(start)
 
 			// Post-request: update quota usage
 			bytesTransferred := int64(len(req.Body) + len(resp.Body))
 			if err := quota.DeductQuota(req.TenantID, 1, bytesTransferred); err != nil {
 				// Log but don't fail - the request succeeded
-				// In production, this should be logged properly
 			}
+
+			// Log API request for billing/audit
+			quota.LogAPIRequest(
+				req.TenantID, req.Method, req.Path, req.RemoteAddr,
+				int64(resp.StatusCode), bytesTransferred, duration.Milliseconds(),
+			)
 
 			return resp
 		}

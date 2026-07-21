@@ -95,6 +95,56 @@ func DeductQuota(tenantID string, callCount int64, bytesTransferred int64) error
 	return nil
 }
 
+// LogAPIRequest records an API request to the api_logs table for billing/audit.
+func LogAPIRequest(tenantID, method, path, remoteAddr string, statusCode, trafficBytes, durationMs int64) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	id := fmt.Sprintf("log-%d", time.Now().UnixNano())
+	_, _ = wasm.DBExec(
+		"INSERT INTO api_logs (id, tenant_id, method, path, status_code, traffic_bytes, duration_ms, remote_addr, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		[]interface{}{id, tenantID, method, path, statusCode, trafficBytes, durationMs, remoteAddr, now},
+	)
+}
+
+// CheckStorageQuota verifies the tenant has room for additional bytes.
+// Returns nil if within limits, or an error if the limit would be exceeded.
+func CheckStorageQuota(tenantID string, additionalBytes int64) error {
+	rows, err := wasm.DBQuery(
+		"SELECT storage_limit, storage_used FROM tenant_quotas WHERE tenant_id = ?",
+		[]interface{}{tenantID},
+	)
+	if err != nil || len(rows) == 0 {
+		return fmt.Errorf("failed to query storage quota")
+	}
+	limit := getInt64(rows[0], "storage_limit")
+	used := getInt64(rows[0], "storage_used")
+
+	if limit > 0 && used+additionalBytes > limit {
+		return fmt.Errorf("storage limit exceeded: %d/%d bytes used", used, limit)
+	}
+	return nil
+}
+
+// AdjustStorageUsed atomically updates the tenant's storage_used counter.
+func AdjustStorageUsed(tenantID string, delta int64) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	rowsAffected, err := wasm.DBExec(
+		`UPDATE tenant_quotas
+		 SET storage_used = storage_used + ?,
+		     updated_at = ?
+		 WHERE tenant_id = ?
+		 AND (storage_limit = 0 OR storage_used + ? <= storage_limit)`,
+		[]interface{}{delta, now, tenantID, delta},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update storage quota: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("storage quota update rejected: limit would be exceeded")
+	}
+	wasm.CacheDel("quota:" + tenantID)
+	return nil
+}
+
 // ResetQuotaCache invalidates the cached quota for a tenant.
 func ResetQuotaCache(tenantID string) {
 	wasm.CacheDel("quota:" + tenantID)
