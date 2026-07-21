@@ -11,6 +11,7 @@ type Request struct {
 	RemoteAddr string
 
 	// Context values set by middleware
+	RequestID string
 	TenantID  string
 	AccessKey string
 	AdminID   string
@@ -59,6 +60,32 @@ func Error(statusCode int, code, message string, details map[string]interface{})
 			"details": details,
 		},
 	})
+}
+
+// InternalError returns a sanitized 500 error that doesn't leak details.
+// The actual error is logged via the msg parameter which callers should log separately.
+func InternalError(msg string) Response {
+	return Error(500, "internal_error", msg, nil)
+}
+
+// BadRequest returns a 400 error.
+func BadRequest(msg string) Response {
+	return Error(400, "bad_request", msg, nil)
+}
+
+// NotFound returns a 404 error.
+func NotFound(msg string) Response {
+	return Error(404, "not_found", msg, nil)
+}
+
+// Unauthorized returns a 401 error.
+func Unauthorized(msg string) Response {
+	return Error(401, "unauthorized", msg, nil)
+}
+
+// Forbidden returns a 403 error.
+func Forbidden(msg string) Response {
+	return Error(403, "forbidden", msg, nil)
 }
 
 // Binary writes a binary response.

@@ -70,7 +70,7 @@ func AdminGitHubLogin(req *types.Request) types.Response {
 		[]interface{}{ghID},
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	var adminID string
@@ -87,13 +87,13 @@ func AdminGitHubLogin(req *types.Request) types.Response {
 			[]interface{}{adminID, ghLogin, ghID, ghName, ghAvatar, "admin", now, now, now},
 		)
 		if err != nil {
-			return types.Error(500, "internal_error", err.Error(), nil)
+			return types.InternalError("database operation failed")
 		}
 	}
 
 	sessionToken, err := auth.CreateAdminSession(adminID)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.Response{
@@ -202,7 +202,7 @@ func AdminListTenants(req *types.Request) types.Response {
 		nil,
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	tenants := make([]map[string]interface{}, 0, len(rows))
@@ -235,15 +235,16 @@ func AdminCreateTenant(req *types.Request) types.Response {
 
 	id := util.UUID()
 	accessKey := util.AccessKey()
-	secretKey := util.AccessKey()
+	rawSecret := util.AccessKey()
+	secretKeyHash := auth.HashSecret(rawSecret)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := wasm.DBExec(
 		"INSERT INTO tenants (id, name, access_key, secret_key_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		[]interface{}{id, body.Name, accessKey, secretKey, "active", now, now},
+		[]interface{}{id, body.Name, accessKey, secretKeyHash, "active", now, now},
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	// Create default quota record
@@ -258,7 +259,7 @@ func AdminCreateTenant(req *types.Request) types.Response {
 			"id":         id,
 			"name":       body.Name,
 			"access_key": accessKey,
-			"secret_key": secretKey,
+			"secret_key": secretKeyHash,
 			"status":     "active",
 			"created_at": now,
 		},
@@ -326,7 +327,7 @@ func AdminUpdateTenant(req *types.Request) types.Response {
 			[]interface{}{*body.Name, now, id},
 		)
 		if err != nil {
-			return types.Error(500, "internal_error", err.Error(), nil)
+			return types.InternalError("database operation failed")
 		}
 	}
 
@@ -336,7 +337,7 @@ func AdminUpdateTenant(req *types.Request) types.Response {
 			[]interface{}{*body.Status, now, id},
 		)
 		if err != nil {
-			return types.Error(500, "internal_error", err.Error(), nil)
+			return types.InternalError("database operation failed")
 		}
 	}
 
@@ -360,7 +361,7 @@ func AdminDeleteTenant(req *types.Request) types.Response {
 		[]interface{}{id},
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.JSON(200, map[string]interface{}{"message": "deleted"})
@@ -378,19 +379,20 @@ func AdminRotateKey(req *types.Request) types.Response {
 		return types.Error(400, "bad_request", "id parameter is required", nil)
 	}
 
-	newSecret := util.AccessKey()
+	newRaw := util.AccessKey()
+	newSecretHash := auth.HashSecret(newRaw)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := wasm.DBExec(
 		"UPDATE tenants SET secret_key_hash = ?, updated_at = ? WHERE id = ?",
-		[]interface{}{newSecret, now, id},
+		[]interface{}{newSecretHash, now, id},
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.JSON(200, map[string]interface{}{
-		"secret_key": newSecret,
+		"secret_key": newSecretHash,
 	})
 }
 
@@ -497,7 +499,7 @@ func AdminListBackends(req *types.Request) types.Response {
 		[]interface{}{tenantID},
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	backends := make([]map[string]interface{}, 0, len(rows))
@@ -552,7 +554,7 @@ func AdminCreateBackend(req *types.Request) types.Response {
 		[]interface{}{id, body.TenantID, body.Name, body.Driver, string(configJSON), isDefault, "active", now, now},
 	)
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.JSON(201, map[string]interface{}{
@@ -632,7 +634,7 @@ func AdminDeleteBackend(req *types.Request) types.Response {
 
 	_, err := wasm.DBExec("DELETE FROM backends WHERE id = ?", []interface{}{id})
 	if err != nil {
-		return types.Error(500, "internal_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.JSON(200, map[string]interface{}{"message": "deleted"})

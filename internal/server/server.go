@@ -23,8 +23,11 @@ func HandleRequest(method, path, headersJSON, body, remoteAddr string) wasm.Requ
 	// Build middleware chain
 	handler := middleware.Chain(
 		middleware.Recovery(),
+		middleware.RequestID(),
 		middleware.CORS(),
+		middleware.SecurityHeaders(),
 		middleware.Logging(),
+		middleware.RateLimit(100, 1000),
 		middleware.Auth(),
 		middleware.Quota(),
 	)(router())

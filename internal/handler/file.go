@@ -62,7 +62,7 @@ func UploadFile(req *types.Request) types.Response {
 
 	// Ensure backend is loaded in Manager
 	if err := ensureBackendLoaded(backendID, req.TenantID); err != nil {
-		return types.Error(500, "backend_error", err.Error(), nil)
+		return types.InternalError("backend operation failed")
 	}
 
 	// Build storage key
@@ -78,7 +78,7 @@ func UploadFile(req *types.Request) types.Response {
 		ContentType: contentType,
 	})
 	if err != nil {
-		return types.Error(500, "upload_failed", err.Error(), nil)
+		return types.InternalError("upload failed")
 	}
 
 	// Insert file record
@@ -135,7 +135,7 @@ func DownloadFile(req *types.Request) types.Response {
 
 	// Ensure backend loaded
 	if err := ensureBackendLoaded(file.BackendID, req.TenantID); err != nil {
-		return types.Error(500, "backend_error", err.Error(), nil)
+		return types.InternalError("backend operation failed")
 	}
 
 	ctx := context.Background()
@@ -206,7 +206,7 @@ func ListFiles(req *types.Request) types.Response {
 		)
 	}
 	if err != nil {
-		return types.Error(500, "db_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	files := make([]map[string]interface{}, 0, len(rows))
@@ -236,7 +236,7 @@ func DeleteFile(req *types.Request) types.Response {
 
 	// Delete from storage
 	if err := ensureBackendLoaded(file.BackendID, req.TenantID); err != nil {
-		return types.Error(500, "backend_error", err.Error(), nil)
+		return types.InternalError("backend operation failed")
 	}
 	ctx := context.Background()
 	if err := storage.GetManager().Delete(ctx, file.BackendID, file.StorageKey); err != nil {
@@ -246,7 +246,7 @@ func DeleteFile(req *types.Request) types.Response {
 	// Delete from DB
 	_, err := wasm.DBExec("DELETE FROM files WHERE id = ?", []interface{}{fileID})
 	if err != nil {
-		return types.Error(500, "db_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	// Release storage quota

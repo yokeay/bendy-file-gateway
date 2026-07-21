@@ -94,3 +94,9 @@ func computeHMAC(key, message string) string {
 	mac.Write([]byte(message))
 	return hex.EncodeToString(mac.Sum(nil))
 }
+
+// HashSecret returns the SHA-256 hash of a secret key for storage.
+func HashSecret(secret string) string {
+	h := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(h[:])
+}

@@ -15,10 +15,11 @@ func Logging() types.Middleware {
 			resp := next(req)
 			duration := time.Since(start)
 
-			log.Printf("[%s] %s %s - %d (%v)",
-				time.Now().Format(time.RFC3339),
+			log.Printf("[%s] %s %s %s - %d (%v)",
+				req.RequestID,
 				req.Method,
 				req.Path,
+				req.RemoteAddr,
 				resp.StatusCode,
 				duration,
 			)

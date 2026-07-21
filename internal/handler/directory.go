@@ -68,7 +68,7 @@ func CreateDirectory(req *types.Request) types.Response {
 		[]interface{}{dirID, req.TenantID, body.ParentID, body.Name, dirPath, now, now},
 	)
 	if err != nil {
-		return types.Error(500, "db_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.JSON(201, map[string]interface{}{
@@ -107,7 +107,7 @@ func ListDirectory(req *types.Request) types.Response {
 		)
 	}
 	if err != nil {
-		return types.Error(500, "db_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	dirs := make([]map[string]interface{}, 0, len(rows))
@@ -163,7 +163,7 @@ func DeleteDirectory(req *types.Request) types.Response {
 
 	_, err = wasm.DBExec("DELETE FROM directories WHERE id = ?", []interface{}{dirID})
 	if err != nil {
-		return types.Error(500, "db_error", err.Error(), nil)
+		return types.InternalError("database operation failed")
 	}
 
 	return types.JSON(200, map[string]interface{}{"deleted": true})
